@@ -1,0 +1,68 @@
+# Production vLLM Deployment + KServe InferenceService with Istio Canary Rollout
+# Implements Section 4: Explicit KV-Cache Tuning (--gpu-memory-utilization, --max-model-len),
+# Warm Minimum Replicas (no scale-to-zero cold start), and 90/10 Canary Routing.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: llama3-1-70b-instruct
+  namespace: ai-inference
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    networking.knative.dev/RolloutDuration: "300s"
+spec:
+  canaryTrafficPercent: 10
+  predictor:
+    minReplicas: 2       # Never scale-to-zero on production 70B LLM (avoids 120s VRAM cold start)
+    maxReplicas: 6
+    scaleTarget: 20
+    scaleMetric: concurrency
+    runtimeClassName: nvidia
+    nodeSelector:
+      nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+    containers:
+      - name: kserve-container
+        image: vllm/vllm-openai:v0.6.4
+        args:
+          - "--model=/models/Meta-Llama-3.1-70B-Instruct-FP8"
+          - "--served-model-name=llama-3.1-70b-instruct"
+          - "--tensor-parallel-size=1"
+          - "--quantization=fp8"
+          - "--kv-cache-dtype=fp8"
+          - "--gpu-memory-utilization=0.92"
+          - "--max-model-len=16384"
+          - "--max-num-seqs=128"
+          - "--enable-prefix-caching"
+          - "--disable-log-requests"
+        ports:
+          - containerPort: 8000
+            name: http1
+            protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 45
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: "16"
+            memory: "96Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "16"
+            memory: "96Gi"
+            nvidia.com/gpu: "1"
+        volumeMounts:
+          - name: model-cache
+            mountPath: /models
+            readOnly: true
+          - name: dshm
+            mountPath: /dev/shm
+    volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: llm-weights-nvme-rwx
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi

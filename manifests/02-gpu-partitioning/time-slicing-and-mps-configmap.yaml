@@ -1,0 +1,47 @@
+# NVIDIA Device Plugin ConfigMap for Time-Slicing (Dev/Bursty Workloads Only)
+# WARNING: Do NOT schedule default vLLM pods (gpu_memory_utilization=0.90) onto Time-Sliced nodes!
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-sharing-configs
+  namespace: gpu-operator
+data:
+  default: |-
+    version: v1
+    flags:
+      migStrategy: mixed
+    sharing:
+      timeSlicing:
+        renameByDefault: false
+        failRequestsGreaterThanOne: true
+        resources: []
+  l40s-timeslicing-4x: |-
+    version: v1
+    flags:
+      migStrategy: none
+    sharing:
+      timeSlicing:
+        renameByDefault: false
+        failRequestsGreaterThanOne: true
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 4
+---
+# CUDA MPS (Multi-Process Service) Sharing Config for Cooperative Inference Pipelines
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mps-sharing-config
+  namespace: gpu-operator
+data:
+  mps-rag-pipeline-2x: |-
+    version: v1
+    flags:
+      migStrategy: none
+    sharing:
+      mps:
+        renameByDefault: false
+        failRequestsGreaterThanOne: true
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 2

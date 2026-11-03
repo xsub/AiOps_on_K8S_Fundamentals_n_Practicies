@@ -1,0 +1,57 @@
+# NVIDIA GPU Operator ClusterPolicy — Production Configuration
+# Implements Section 1: Decoupled Drivers, Default nvidia RuntimeClass, MIG Mixed Strategy, and DCGM Telemetry
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-policy
+spec:
+  operator:
+    defaultRuntime: containerd
+    use_ocp_driver_toolkit: false
+    initContainer: {}
+  driver:
+    enabled: true
+    usePrecompiled: true
+    repository: nvcr.io/nvidia
+    image: driver
+    version: "550.90.07"
+    rdma:
+      enabled: true
+      useHostMofed: false
+    upgradePolicy:
+      autoUpgrade: true
+      maxParallelUpgrades: 1
+      podDeletion:
+        force: false
+        timeoutSeconds: 300
+      waitForCompletion:
+        timeoutSeconds: 600
+  toolkit:
+    enabled: true
+    installDir: /usr/local/nvidia
+  devicePlugin:
+    enabled: true
+    config:
+      name: gpu-sharing-configs
+      default: "default"
+  mig:
+    strategy: mixed
+  migManager:
+    enabled: true
+    config:
+      name: custom-mig-parted-configs
+      default: "all-balanced"
+  dcgmExporter:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      interval: 15s
+    config:
+      name: dcgm-metrics-config
+  gfd:
+    enabled: true
+  validator:
+    plugin:
+      env:
+        - name: WITH_WORKLOAD
+          value: "false"

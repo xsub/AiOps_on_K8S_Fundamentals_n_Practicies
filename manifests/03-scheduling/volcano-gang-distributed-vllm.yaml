@@ -1,0 +1,70 @@
+# Volcano Gang Scheduling + NVLink Topology-Aware Distributed vLLM Serving
+# Guarantees atomic all-or-nothing placement of 2 pods x 4 H100 GPUs (8 GPUs total)
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: PodGroup
+metadata:
+  name: llama3-405b-gang-group
+  namespace: ai-inference
+spec:
+  minMember: 2
+  minTaskMember:
+    head: 1
+    worker: 1
+  queue: llm-inference-prod
+  minResources:
+    cpu: "64"
+    memory: "512Gi"
+    nvidia.com/gpu: "8"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm-llama3-405b-fp8
+  namespace: ai-inference
+spec:
+  serviceName: vllm-llama3-405b-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vllm-llama3-405b
+  template:
+    metadata:
+      labels:
+        app: vllm-llama3-405b
+      annotations:
+        scheduling.k8s.io/group-name: llama3-405b-gang-group
+        volcano.sh/task-spec: worker
+    spec:
+      schedulerName: volcano
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+        nvidia.com/gpu.machine: "DGX-H100"
+      containers:
+        - name: vllm-worker
+          image: vllm/vllm-openai:v0.6.4
+          env:
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: "spawn"
+          resources:
+            requests:
+              cpu: "32"
+              memory: "256Gi"
+              nvidia.com/gpu: "4"
+            limits:
+              cpu: "32"
+              memory: "256Gi"
+              nvidia.com/gpu: "4"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        # Critical for NCCL AllReduce across GPUs — avoids 64Mi default /dev/shm SIGBUS crash
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi

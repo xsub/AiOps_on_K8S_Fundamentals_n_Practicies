@@ -1,0 +1,31 @@
+# NVIDIA MIG Manager ConfigMap (mig-parted) for A100-80GB / H100-80GB Nodes
+# Exposes isolated hardware slices: 3g.40gb (Medium LLMs), 2g.20gb (Small 7B-8B LLMs), 1g.10gb (Embeddings/Rerankers)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-mig-parted-configs
+  namespace: gpu-operator
+data:
+  config.yaml: |-
+    version: v1
+    mig-configs:
+      all-disabled:
+        - devices: all
+          mig-enabled: false
+
+      # Mixed multi-tenant profile on an 8x H100-80GB Node:
+      # GPUs 0-3: Full GPUs (4x 80GB for Tensor-Parallel 70B LLM)
+      # GPUs 4-5: 2x 3g.40gb per GPU (4x 40GB slices for 8B-14B models)
+      # GPUs 6-7: 1x 2g.20gb + 5x 1g.10gb per GPU (Embeddings, Rerankers, Guardrails)
+      all-balanced:
+        - devices: [0,1,2,3]
+          mig-enabled: false
+        - devices: [4,5]
+          mig-enabled: true
+          mig-devices:
+            "3g.40gb": 2
+        - devices: [6,7]
+          mig-enabled: true
+          mig-devices:
+            "2g.20gb": 1
+            "1g.10gb": 5
