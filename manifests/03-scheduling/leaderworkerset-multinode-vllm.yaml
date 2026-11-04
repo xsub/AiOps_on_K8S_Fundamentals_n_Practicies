@@ -1,0 +1,113 @@
+# Kubernetes SIG-Apps LeaderWorkerSet (leaderworkerset.x-k8s.io/v1)
+# Multi-Node LLM Distributed Serving (2 nodes x 8 H100 = 16 GPUs total)
+# Implements Tensor Parallelism (TP=8) + Pipeline Parallelism (PP=2) for Llama-3.1-405B with Ray + vLLM
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm-llama3-405b-lws
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-llama3-405b
+    app.kubernetes.io/part-of: aiops-scheduling
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2                      # 1 Leader + 1 Worker = 2 nodes x 8 H100 = 16 GPUs total
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+          app: vllm-llama3-405b
+      spec:
+        runtimeClassName: nvidia
+        nodeSelector:
+          nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+        subdomain: vllm-llama3-cluster
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-openai:v0.6.4
+            command: ["/bin/bash", "-c"]
+            args:
+              - >
+                ray start --head --port=6379 --num-gpus=8 &&
+                python3 -m vllm.entrypoints.openai.api_server
+                --model meta-llama/Meta-Llama-3.1-405B-Instruct-FP8
+                --tensor-parallel-size 8
+                --pipeline-parallel-size 2
+                --gpu-memory-utilization 0.90
+            env:
+              - name: NCCL_DEBUG
+                value: "INFO"
+              - name: NCCL_IB_DISABLE
+                value: "0"
+              - name: NCCL_IB_HCA
+                value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+              - name: NCCL_P2P_LEVEL
+                value: "NVL"
+            resources:
+              requests:
+                cpu: "64"
+                memory: "512Gi"
+                nvidia.com/gpu: "8"
+              limits:
+                cpu: "64"
+                memory: "512Gi"
+                nvidia.com/gpu: "8"
+            securityContext:
+              capabilities:
+                add: ["IPC_LOCK"]
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+    workerTemplate:
+      metadata:
+        labels:
+          role: worker
+          app: vllm-llama3-405b
+      spec:
+        runtimeClassName: nvidia
+        nodeSelector:
+          nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+        subdomain: vllm-llama3-cluster
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:v0.6.4
+            command: ["/bin/bash", "-c"]
+            args:
+              - >
+                ray start --address=$(LWS_LEADER_ADDRESS):6379 --num-gpus=8 --block
+            env:
+              - name: NCCL_DEBUG
+                value: "INFO"
+              - name: NCCL_IB_DISABLE
+                value: "0"
+              - name: NCCL_IB_HCA
+                value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+              - name: NCCL_P2P_LEVEL
+                value: "NVL"
+            resources:
+              requests:
+                cpu: "64"
+                memory: "512Gi"
+                nvidia.com/gpu: "8"
+              limits:
+                cpu: "64"
+                memory: "512Gi"
+                nvidia.com/gpu: "8"
+            securityContext:
+              capabilities:
+                add: ["IPC_LOCK"]
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi

@@ -1,0 +1,58 @@
+# Production KEDA ScaledObject for vLLM Inference Autoscaling
+# Implements Section 4: Queue- and KV-Cache-Aware Elasticity
+# Scaling on vllm:num_requests_waiting and vllm:gpu_cache_usage_perc with 600s scale-down stabilization
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-llama3-70b-keda-autoscaler
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-autoscaler
+    app.kubernetes.io/part-of: aiops-inference-serving
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: llama3-1-70b-instruct-predictor-default
+  minReplicaCount: 2          # HA baseline; avoids catastrophic 120s VRAM cold start
+  maxReplicaCount: 10         # Maximum scaled capacity (10 replicas x 8 GPUs)
+  pollingInterval: 5          # Scrape Prometheus every 5s for rapid queue detection
+  cooldownPeriod: 600         # 10m cooldown period before terminating warm GPU pods
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0   # Scale up immediately when queue spikes
+          policies:
+            - type: Percent
+              value: 100                  # Double capacity under high load
+              periodSeconds: 15
+            - type: Pods
+              value: 2                    # Minimum scale-up step
+              periodSeconds: 15
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 600 # 10m stabilization window to prevent flapping & cold-start thrashing
+          policies:
+            - type: Pods
+              value: 1                    # Safely terminate 1 pod at a time
+              periodSeconds: 60
+          selectPolicy: Min
+  triggers:
+    # Trigger 1: vLLM Waiting Request Queue Depth
+    # High waiting requests directly impact TTFT (Time-To-First-Token) SLA
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        metricName: vllm_num_requests_waiting
+        query: sum(vllm:num_requests_waiting{model_name="llama-3.1-70b-instruct"})
+        threshold: "5"
+
+    # Trigger 2: GPU KV-Cache Utilization Ratio
+    # Saturation above 0.80 (80%) triggers proactive scale-out before preemption storms occur
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        metricName: vllm_gpu_cache_usage_perc
+        query: avg(vllm:gpu_cache_usage_perc{model_name="llama-3.1-70b-instruct"})
+        threshold: "0.80"

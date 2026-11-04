@@ -1,75 +1,189 @@
 # 1. Hardware Abstraction & Orchestration
 
-> **Related Manifests**: [`gpu-operator-clusterpolicy.yaml`](../manifests/01-hardware-orchestration/gpu-operator-clusterpolicy.yaml) | [`nvidia-runtimeclass.yaml`](../manifests/01-hardware-orchestration/nvidia-runtimeclass.yaml)  
+> **Related Manifests**:
+> - [`gpu-operator-clusterpolicy.yaml`](../manifests/01-hardware-orchestration/gpu-operator-clusterpolicy.yaml)
+> - [`nvidia-runtimeclass.yaml`](../manifests/01-hardware-orchestration/nvidia-runtimeclass.yaml)
+> - [`kueue-gpu-clusterqueue.yaml`](../manifests/01-hardware-orchestration/kueue-gpu-clusterqueue.yaml)
+> - [`dra-gpu-resourceclaim.yaml`](../manifests/01-hardware-orchestration/dra-gpu-resourceclaim.yaml)  
+>
 > **Companion CLI ([`KubeVRAM`](https://github.com/xsub/KubeVRAM))**: `kubevram topology` | `kubevram rbac-audit` | `kubevram bridge driver`
 
 ---
 
 ## 1.1 The Kubernetes Hardware Abstraction Gap
 
-Kubernetes natively schedules only two compute primitives at the kernel cgroup level:
-1. **`cpu`**: Compressible compute time measured in millicores (`1000m = 1 vCPU`), enforced via the Linux Completely Fair Scheduler (CFS `cpu.cfs_quota_us` / cgroup v2 `cpu.max`). Throttling slows execution without killing the process.
-2. **`memory`**: Incompressible host DRAM measured in bytes (`Gi` / `Mi`), enforced via the Linux cgroup memory controller (`memory.max`). Exceeding this limit invokes the kernel OOM killer (`SIGKILL`, Exit Code `137`).
+Kubernetes was architected around general-purpose CPU compute and host DRAM. At the Linux kernel level, the kubelet manages container resource boundaries using two native cgroup controllers:
+1. **`cpu` controller**: Compressible compute cycles measured in millicores (`1000m = 1 vCPU`), enforced via the Linux Completely Fair Scheduler (CFS `cpu.cfs_quota_us` in cgroup v1 or `cpu.max` in cgroup v2). When a container exceeds its quota, the kernel throttles execution without terminating the process.
+2. **`memory` controller**: Incompressible host DRAM measured in bytes (`Gi` or `Mi`), enforced via `memory.max`. When physical memory consumption crosses the cgroup limit, the Linux kernel Out-Of-Memory (OOM) killer invokes `SIGKILL` (Exit Code `137`).
 
-Everything outside CPU and host DRAM—NVIDIA GPUs, HBM3e VRAM, Tensor Cores, NVSwitches, and InfiniBand/RoCEv2 HCAs—is **opaque to core Kubernetes**.
-
-### Evolution: Device Plugin API vs. Dynamic Resource Allocation (DRA)
-
-Kubernetes bridges this hardware gap through two mechanisms:
-
-| Dimension | Device Plugin Framework (`v1beta1`, Current Standard) | Dynamic Resource Allocation (DRA + CDI, K8s 1.31–1.32+) |
-| :--- | :--- | :--- |
-| **Resource Syntax** | Scalar integer in `resources.limits` (`nvidia.com/gpu: 2`) | Structured `ResourceClaim`, `ResourceClaimTemplate`, `DeviceClass` |
-| **Parameter Passing** | Static ConfigMaps per node; no per-pod parameters | Arbitrary structured parameters per claim (MPS limits, MIG profile, fabric clique) |
-| **Multi-Pod Sharing** | Workarounds only (Time-Slicing integer multiplication) | Native multi-container & multi-pod sharing of a single `ResourceClaim` |
-| **Topology Awareness** | Node-local `TopologyManager` hints only | Scheduler-level CEL expressions across `ResourceSlice` attributes (e.g., NVLink domain IDs) |
-| **Container Injection** | Device Plugin `Allocate()` gRPC response + OCI hook | Standardized **CDI (Container Device Interface)** JSON specs (`/var/run/cdi/nvidia.yaml`) |
+Accelerated AI hardware—such as NVIDIA Hopper/Blackwell GPUs, High Bandwidth Memory (HBM3/HBM3e), Tensor Cores, NVSwitch fabrics, and InfiniBand/RoCEv2 Host Channel Adapters (HCAs)—**is completely invisible to core Kubernetes**. A GPU does not possess a native Linux cgroup controller for VRAM allocation or compute engine time-slicing.
 
 ```mermaid
-sequenceDiagram
-    participant PCIe as Host PCIe / NVSwitch
-    participant NFD as Node Feature Discovery
-    participant Driver as NVIDIA Driver DaemonSet
-    participant Toolkit as nvidia-container-toolkit
-    participant Plugin as NVIDIA Device Plugin + GFD
-    participant Kubelet as Kubelet
-    participant API as Kube-APIServer
+flowchart TD
+    subgraph Kernel["Linux Kernel cgroups"]
+        CPU["cpu.max (CFS Throttling)"]
+        MEM["memory.max (Host DRAM OOM Killer)"]
+    end
 
-    PCIe->>NFD: Exposes PCI vendor ID 0x10de (NVIDIA)
-    NFD->>API: Labels Node: feature.node.kubernetes.io/pci-10de.present=true
-    API->>Driver: Schedules Driver DaemonSet onto labeled node
-    Driver->>PCIe: Loads nvidia.ko, nvidia-uvm.ko, nvidia-modeset.ko, nvidia-peermem.ko
-    Toolkit->>Kubelet: Registers RuntimeClass handler "nvidia" in /etc/containerd/config.toml
-    Plugin->>Driver: Queries NVML (GPU UUIDs, VRAM, MIG slices, Health)
-    Plugin->>Kubelet: Register() & ListAndWatch() on /var/lib/kubelet/device-plugins/kubelet.sock
-    Kubelet->>API: Updates Node.status.allocatable["nvidia.com/gpu"] & GFD labels
+    subgraph Opaque["Opaque Hardware (No Kernel cgroup)"]
+        VRAM["HBM3/HBM3e VRAM (Incompressible)"]
+        SM["Streaming Multiprocessors / Tensor Cores"]
+        NVL["NVSwitch / NVLink Interconnect"]
+        RDMA["PCIe Gen5 / InfiniBand HCAs"]
+    end
+
+    K8s["Kubernetes Control Plane (kube-scheduler & kubelet)"] --> Kernel
+    K8s -. "Bypasses Core cgroups (Requires Device Plugin / DRA / CDI)" .-> Opaque
 ```
 
 ---
 
-## 1.2 NVIDIA GPU Operator Architecture & Lifecycle
+### Evolution: Device Plugin Framework vs. Dynamic Resource Allocation (DRA) & CDI
 
-Installing NVIDIA drivers manually on host OS images (`apt install nvidia-driver-550` or golden AMIs) breaks down in Day-2 Kubernetes operations:
-- Unattended Linux kernel security updates break DKMS module builds on reboot.
-- Upgrading CUDA drivers across a 64-node H100 cluster requires manual SSH drain scripts and image rebuilds.
-- Host user-space library paths (`/usr/lib/x86_64-linux-gnu/libcuda.so`) drift across node pools.
+To bridge this hardware gap, Kubernetes has evolved through two distinct resource management architectures:
 
-The **NVIDIA GPU Operator** solves this by managing the entire GPU software stack declaratively through a single `ClusterPolicy` Custom Resource:
+| Architectural Dimension | Device Plugin Framework (`v1beta1`) | Dynamic Resource Allocation (DRA `resource.k8s.io/v1beta1`) |
+| :--- | :--- | :--- |
+| **API Abstraction** | Scalar integer in `resources.limits` (e.g., `nvidia.com/gpu: 2`) | Structured `ResourceClaim`, `ResourceClaimTemplate`, and `DeviceClass` |
+| **Configuration Model** | Node-level static ConfigMaps; zero container-specific flags | Declarative, per-claim parameters (e.g., VRAM minimums, compute capability, MIG profile) |
+| **Device Selection Logic** | Kubelet picks devices sequentially via node-local state | Dynamic CEL (Common Expression Language) evaluation across `ResourceSlice` objects |
+| **Sharing Model** | Global node-level multiplexing (Time-Slicing integer multiplier) | First-class sharing: multiple pods and containers bind to a single `ResourceClaim` |
+| **Interconnect Topology** | Weak heuristics via local Kubelet `TopologyManager` | Native fabric awareness: claims evaluate NVLink clique IDs and PCIe switch domains |
+| **Container Runtime Hook** | Proprietary OCI prestart hooks (`nvidia-container-runtime-hook`) | Standardized **Container Device Interface (CDI)** (`/etc/cdi/nvidia.yaml`) |
 
-| Operator DaemonSet | Core Responsibility | Failure Symptom When Broken | Diagnostic Command |
+#### Device Plugin Protocol Mechanics (`v1beta1`)
+
+The legacy Device Plugin model operates as an out-of-process gRPC server communicating with `kubelet` over a UNIX domain socket:
+1. **Registration**: The device plugin connects to `/var/lib/kubelet/device-plugins/kubelet.sock` and issues a `Register()` call advertising its resource name (`nvidia.com/gpu`).
+2. **ListAndWatch**: Kubelet opens a persistent stream. The plugin queries NVML and streams back a list of healthy device UUIDs (`[GPU-aaa, GPU-bbb]`). If a GPU experiences an unrecoverable hardware XID error, the plugin reports it as unhealthy.
+3. **Allocate**: When a pod requesting `nvidia.com/gpu: 1` lands on the node, kubelet calls `Allocate()`. The plugin returns environment variables (`NVIDIA_VISIBLE_DEVICES=GPU-aaa`), character device paths, and mount points.
+
+#### Container Device Interface (CDI) & Dynamic Resource Allocation
+
+While the Device Plugin protocol relied on custom OCI prestart hooks to inspect environment variables and inject `/dev/nvidia*` nodes into container root filesystems, **CDI** standardizes device injection directly into the Container Runtime Interface (CRI):
+
+```yaml
+# Generated by nvidia-container-toolkit at /var/run/cdi/nvidia.yaml
+cdiVersion: "0.5.0"
+kind: "nvidia.com/gpu"
+devices:
+  - name: "0"
+    containerEdits:
+      deviceNodes:
+        - path: "/dev/nvidia0"
+          hostPath: "/dev/nvidia0"
+          type: "c"
+          permissions: "rw"
+        - path: "/dev/nvidiactl"
+          hostPath: "/dev/nvidiactl"
+          type: "c"
+          permissions: "rw"
+        - path: "/dev/nvidia-uvm"
+          hostPath: "/dev/nvidia-uvm"
+          type: "c"
+          permissions: "rw"
+      mounts:
+        - hostPath: "/usr/lib/x86_64-linux-gnu/libcuda.so"
+          containerPath: "/usr/lib/x86_64-linux-gnu/libcuda.so"
+          options: ["ro", "nosuid", "nodev", "bind"]
+```
+
+Under Kubernetes **DRA (`resource.k8s.io/v1beta1`)**, scheduling decisions are no longer constrained by simple integer arithmetic. Instead, the central scheduler evaluates structured claims against `ResourceSlice` objects using Common Expression Language (CEL). Once scheduled, the DRA driver invokes `NodePrepareResource`, maps the hardware via CDI, and binds it to the pod's container lifecycle (see [`dra-gpu-resourceclaim.yaml`](../manifests/01-hardware-orchestration/dra-gpu-resourceclaim.yaml)).
+
+```mermaid
+sequenceDiagram
+    participant Pod as Pod Spec (ResourceClaim)
+    participant Sched as Central Scheduler (DRA Plugin)
+    participant Kubelet as Kubelet / DRA Node Driver
+    participant CDI as CDI Registry (/etc/cdi/nvidia.yaml)
+    participant CRI as Containerd / CRI-O Runtime
+    participant GPU as Physical GPU Hardware
+
+    Pod->>Sched: Requests DeviceClass: nvidia-h100-gpu
+    Sched->>Sched: Evaluates CEL expressions against ResourceSlice objects
+    Sched->>Kubelet: Binds Pod to Node & Reserves ResourceClaim
+    Kubelet->>CDI: Resolves fully-qualified device "nvidia.com/gpu=0"
+    CDI-->>Kubelet: Returns device mounts, hooks, and /dev/nvidia* nodes
+    Kubelet->>CRI: CreateContainer() with CDI device specifications
+    CRI->>GPU: Mounts exact character devices and drivers into container namespaces
+```
+
+---
+
+## 1.2 NVIDIA GPU Operator Lifecycle & Internals
+
+The **NVIDIA GPU Operator** automates the deployment and Day-2 management of all GPU software components on Kubernetes. Rather than baking proprietary drivers and CUDA libraries into mutable OS golden images, the Operator reconciles the entire software stack via the `ClusterPolicy` Custom Resource (see [`gpu-operator-clusterpolicy.yaml`](../manifests/01-hardware-orchestration/gpu-operator-clusterpolicy.yaml)).
+
+### Subsystem Architecture
+
+```mermaid
+flowchart TD
+    NFD["1. Node Feature Discovery (NFD)\nPCI Scan: 0x10de (GPU), 0x15b3 (Mellanox)"] --> Driver["2. Driver Container\n(nvidia.ko, nvidia-uvm.ko, nvidia-peermem.ko)"]
+    Driver --> Toolkit["3. NVIDIA Container Toolkit\n(Generates CDI specs & configures containerd)"]
+    Toolkit --> Validator["4. Operator Validator\n(Runs CUDA workload smoke test)"]
+    Validator --> Plugin["5. NVIDIA Device Plugin\n(ListAndWatch /var/lib/kubelet/device-plugins)"]
+    Validator --> GFD["6. GPU Feature Discovery (GFD)\n(Applies product, family, VRAM node labels)"]
+    GFD --> Exporter["7. DCGM Exporter\n(Exports DCGM_FI_* metrics on :9400)"]
+    GFD --> MIGMgr["8. MIG Manager (mig-parted)\n(Watches nvidia.com/mig.config labels)"]
+```
+
+| Component | Execution Mode | Responsibilities & Failure Modes | Diagnostic Command |
 | :--- | :--- | :--- | :--- |
-| **Node Feature Discovery (NFD)** | Scans PCIe bus (`0x10de` = NVIDIA, `0x15b3` = Mellanox/NVIDIA Networking) and applies `feature.node.kubernetes.io/*` labels. | None of the GPU Operator pods schedule onto new worker nodes. | `kubectl get node <node> --show-labels \| grep 10de` |
-| **NVIDIA Driver Container** | Runs a privileged container that loads precompiled (or compiles) `nvidia.ko`, `nvidia-uvm.ko`, and `nvidia-peermem.ko` (for GPUDirect RDMA). | `NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver`. | `kubectl logs -n gpu-operator -l app=nvidia-driver-daemonset` |
-| **NVIDIA Container Toolkit** | Installs `nvidia-container-runtime` / CDI specs and updates `/etc/containerd/config.toml` with the `nvidia` runtime handler and restarts/signals `containerd`. | Pod schedules and runs, but `torch.cuda.is_available()` returns `False` or `/dev/nvidiactl` is missing. | `kubectl logs -n gpu-operator -l app=nvidia-container-toolkit-daemonset` |
-| **NVIDIA Operator Validator** | Executes init/validation checks (`driver`, `toolkit`, `cuda`, `plugin`) before marking the node ready for user GPU pods. | Device plugin stays in `Init:0/1`; `nvidia.com/gpu` remains `0`. | `kubectl get pods -n gpu-operator -l app=nvidia-operator-validator` |
-| **NVIDIA Device Plugin** | Queries NVML, applies Time-Slicing/MPS ConfigMaps, monitors XID health (`ListAndWatch`), and advertises `nvidia.com/gpu` or `nvidia.com/mig-*` to `kubelet`. | `0/N nodes are available: Insufficient nvidia.com/gpu`. | `kubectl logs -n gpu-operator -l app=nvidia-device-plugin-daemonset` |
-| **GPU Feature Discovery (GFD)** | Enriches nodes with SKU, VRAM, compute capability, and MIG labels (`nvidia.com/gpu.product`, `nvidia.com/gpu.memory`, `nvidia.com/cuda.runtime.major`). | `nodeSelector` rules targeting `NVIDIA-H100-80GB-HBM3` never match. | `kubectl describe node <node> \| grep nvidia.com/` |
-| **MIG Manager (`mig-parted`)** | Watches `nvidia.com/mig.config` node labels, drains/stops GPU clients if needed, and reconfigures hardware MIG instances via NVML. | `nvidia.com/mig.config.state=failed` (usually due to an active process holding `/dev/nvidia*`). | `kubectl logs -n gpu-operator -l app=nvidia-mig-manager` |
-| **DCGM Exporter** | Exports per-GPU and per-MIG-slice hardware counters (`DCGM_FI_*`) on `:9400/metrics` with pod metadata labels. | Prometheus/Grafana and OOM triage lose hardware visibility. | `kubectl port-forward -n gpu-operator ds/nvidia-dcgm-exporter 9400:9400` |
+| **Node Feature Discovery (NFD)** | DaemonSet | Scans host PCIe bus for vendor ID `0x10de` (NVIDIA) and `0x15b3` (Mellanox). Labels node with `feature.node.kubernetes.io/pci-10de.present=true`. If broken, GPU Operator ignores the node. | `kubectl get nodes -l feature.node.kubernetes.io/pci-10de.present=true` |
+| **NVIDIA Driver Container** | DaemonSet (Privileged) | Compiles or loads precompiled kernel modules (`nvidia.ko`, `nvidia-uvm.ko`, `nvidia-modeset.ko`, `nvidia-peermem.ko`). Failure leaves nodes without `/dev/nvidiactl`. | `kubectl logs -n gpu-operator -l app=nvidia-driver-daemonset --tail=100` |
+| **Container Toolkit** | DaemonSet | Installs `/usr/local/nvidia/toolkit`, writes `/etc/cdi/nvidia.yaml`, and configures `/etc/containerd/config.toml` runtime handlers. | `crictl info \| jq .config.containerd.runtimes` |
+| **Operator Validator** | DaemonSet / Init | Runs validation containers to verify driver loading, toolkit integration, and CUDA sample execution before un-tainting the node. | `kubectl describe pod -n gpu-operator -l app=nvidia-operator-validator` |
+| **Device Plugin** | DaemonSet | Implements Kubelet Device Plugin gRPC API (`ListAndWatch`, `Allocate`). Monitors device health (XID errors). | `kubectl logs -n gpu-operator -l app=nvidia-device-plugin-daemonset` |
+| **GPU Feature Discovery (GFD)** | DaemonSet | Discovers GPU SKU, VRAM capacity, compute capability, and driver version. Applies node labels used by schedulers. | `kubectl get node <node> -o json \| jq .metadata.labels` |
+| **MIG Manager (`mig-parted`)** | DaemonSet | Reconfigures physical GPU hardware into MIG slices based on `nvidia.com/mig.config` label changes. | `kubectl logs -n gpu-operator -l app=nvidia-mig-manager` |
+| **DCGM Exporter** | DaemonSet | Collects hardware telemetries (SM activity, memory usage, NVLink bandwidth) at sub-second granularity. | `curl -s http://<node-ip>:9400/metrics \| grep DCGM_FI_` |
 
-### Essential GFD Node Labels for Production Scheduling
+---
 
-When GFD runs healthy, every GPU node exposes deterministic scheduling labels:
+### Precompiled Driver Containers vs. DKMS Compilation
+
+During cluster autoscaling, the driver installation strategy represents the primary operational bottleneck:
+
+| Evaluation Criteria | Precompiled Driver Containers (`usePrecompiled: true`) | Dynamic Kernel Module Support (DKMS Compilation) |
+| :--- | :--- | :--- |
+| **Scale-Up Node Latency** | **20 to 45 seconds** (image pull + container start) | **4 to 10 minutes** (downloads GCC, kernel headers, builds `.ko`) |
+| **Cluster Autoscaling Behavior** | Predictable, low-jitter scale-out during inference traffic spikes | High risk of autoscaler scale-up timeouts; pods stay `Pending` |
+| **Failure Surface** | Requires prebuilt image matching exact kernel commit hash | Fails if public apt/yum repos are offline or kernel headers mismatch |
+| **Network & Air-Gap Suitability** | Excellent: self-contained image mirrored to private registry | High risk in air-gapped clusters due to external compiler dependencies |
+| **OS Patch Rollouts** | Host kernel updates require pushing updated driver image tags | Attempts automatic rebuild on reboot (prone to GCC version incompatibilities) |
+
+> [!IMPORTANT]
+> Always set `driver.usePrecompiled: true` in production environments. Pair this with locked host kernel packages (`apt-mark hold linux-image-generic` or immutable OS distros like Flatcar / Talos) to ensure deterministic node bootstrap times.
+
+---
+
+### Safe Driver Rolling Upgrades (`upgradePolicy`)
+
+Upgrading NVIDIA drivers live in a running Kubernetes cluster presents a severe hazard: the Linux kernel cannot unload `nvidia.ko` if any open file descriptor points to `/dev/nvidia*`. The GPU Operator solves this through the Driver Upgrade Controller:
+1. **Node Cordoning**: The controller marks the node unschedulable (`schedulable=false`).
+2. **Pod Eviction**: Evicts running inference and batch pods, honoring `PodDisruptionBudget` rules until `timeoutSeconds` expires.
+3. **Module Unload & Reload**: Once all `/dev/nvidia*` file handles close, the driver container unloads old `.ko` modules and inserts the new version.
+4. **Validation Smoke Test**: The operator validator runs CUDA verification containers.
+5. **Node Uncordon**: The node is marked ready, and GFD updates driver version labels.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NodeBoot: Node Joins Cluster with Taint nvidia.com/gpu:NoSchedule
+    NodeBoot --> NFD_Scan: NFD Detects PCIe 0x10de
+    NFD_Scan --> Driver_Load: Operator Schedules Driver Container
+    Driver_Load --> Toolkit_Config: Driver Inserts nvidia.ko & nvidia-peermem.ko
+    Toolkit_Config --> Validator_Run: Toolkit Writes CDI Specs & Reloads containerd
+    Validator_Run --> Unhealthy: CUDA VectorAdd Smoke Test Fails (XID Error)
+    Validator_Run --> Ready: Smoke Test Passes
+    Unhealthy --> [*]: Node Remains Tainted
+    Ready --> DevicePlugin_Register: Device Plugin Calls Kubelet Register()
+    DevicePlugin_Register --> Clear_Taint: Allocatable GPUs Advertised to API Server
+    Clear_Taint --> [*]: GPU Pods Scheduled
+```
+
+### Production Node Labeling via GPU Feature Discovery (GFD)
+
+Once the Operator Validator marks the stack healthy, GFD attaches standard attributes directly to the Node resource:
 
 ```yaml
 metadata:
@@ -81,115 +195,139 @@ metadata:
     nvidia.com/gpu.compute.minor: "0"
     nvidia.com/gpu.count: "8"
     nvidia.com/gpu.memory: "81920"
-    nvidia.com/gpu.replicas: "1"
-    nvidia.com/gpu.sharing-strategy: "none"   # none | time-slicing | mps
-    nvidia.com/mig.strategy: "mixed"          # none | single | mixed
+    nvidia.com/gpu.sharing-strategy: "none"
+    nvidia.com/mig.strategy: "mixed"
     nvidia.com/cuda.driver.major: "550"
 ```
 
 ---
 
-## 1.3 Production Engineering Practices
+## 1.3 Hypervisor vs. Bare-Metal Kubernetes Nodes
 
-### Practice 1: Decoupled Precompiled Drivers & Safe Rolling Upgrades
+Architecting Kubernetes GPU worker nodes requires selecting the appropriate infrastructure layer:
 
-Configure `ClusterPolicy` (see [`manifests/01-hardware-orchestration/gpu-operator-clusterpolicy.yaml`](../manifests/01-hardware-orchestration/gpu-operator-clusterpolicy.yaml)) with:
-1. **`driver.enabled: true` and `driver.usePrecompiled: true`**: Precompiled driver images match exact Ubuntu/RHEL/COS kernel versions, cutting node scale-up time from **4–7 minutes** (GCC compilation) down to **~20–35 seconds** and eliminating compiler/header drift.
-2. **Controlled `upgradePolicy`**: Never upgrade GPU drivers across all nodes simultaneously! Because unloading `nvidia.ko` requires zero open file descriptors on `/dev/nvidia*`, the Driver Upgrade Controller must cordon the node, evict inference pods (respecting `PodDisruptionBudget`), reload the kernel module, re-validate CUDA, and uncordon:
-   ```yaml
-   driver:
-     enabled: true
-     usePrecompiled: true
-     version: "550.90.07"
-     upgradePolicy:
-       autoUpgrade: true
-       maxParallelUpgrades: 1          # Upgrade 1 GPU node at a time to protect serving capacity
-       cordon: true
-       podDeletion:
-         force: false
-         timeoutSeconds: 300           # Allow in-flight LLM streaming responses to drain cleanly
-   ```
-3. **Startup Taints (`nvidia.com/gpu:NoSchedule`)**: Apply `nvidia.com/gpu:NoSchedule` to GPU node pools at provisioning time so CPU-only microservices (`coredns`, `fluent-bit` without tolerations, general web APIs) never consume scarce CPU/RAM on \$30/hr GPU nodes.
+| Architectural Metric | Bare-Metal Kubernetes | VFIO-PCI Passthrough (VM) | NVIDIA vGPU Mediated Devices (VM) |
+| :--- | :--- | :--- | :--- |
+| **Compute Overhead** | **0%** (Direct bare-metal execution) | **<1%** (Near-native CPU/GPU execution) | **2% to 6%** (Hypervisor context switching) |
+| **Interconnect (NVLink/NVSwitch)** | Full hardware bandwidth (`900 GB/s` on H100) | Full bandwidth only if all linked GPUs pass to 1 VM | Severely limited or unsupported across VMs |
+| **GPUDirect RDMA Throughput** | Line rate (`400 Gbps` / `800 Gbps` per NIC) | Requires SR-IOV vNIC passthrough + IOMMU pinning | High latency jitter; virtual switch traversal |
+| **Licensing Requirement** | None (Standard Data Center drivers) | None (Standard Data Center drivers) | **Mandatory NVIDIA AI Enterprise (NVAIE) NLS license** |
+| **VRAM & Compute Partitioning** | Kubernetes native (MIG, MPS, Time-Slicing) | Kubernetes native (MIG, MPS, Time-Slicing) | Fixed by hypervisor profile (e.g., `L40S-24Q`, `A100-3-40C`) |
+| **Driver Management Layer** | Managed entirely by Kubernetes GPU Operator | Managed entirely by Kubernetes GPU Operator | Hypervisor host driver + guest vGPU driver lockstep |
 
-> [!WARNING]
-> **Hypervisor / Managed Cloud Exception**: If your Kubernetes worker VMs receive **NVIDIA vGPU** profiles from a hypervisor (VMware vSphere / Proxmox / KVM `nvidia-vgpu-mgr`) OR use a cloud provider image with pre-installed drivers, check whether host drivers are already loaded (`driver.enabled: false` vs `vGPU` guest driver image with license ConfigMap). Loading a bare-metal driver container atop an existing host `nvidia.ko` will fail module insertion! (See [Guide 02, Section 2.1](./02-gpu-partitioning-strategies.md) for hypervisor architecture.)
+### Deep Dive: VFIO-PCI Passthrough Constraints
+
+When passing raw PCIe GPUs into virtual machines (e.g., KubeVirt, Proxmox, VMware ESXi):
+1. **IOMMU Groups and PCIe Access Control Services (ACS)**:
+   The host Linux kernel groups PCIe devices into IOMMU groups to prevent DMA attacks between devices. If a server's PCIe root port lacks hardware ACS support, or if cards share an upstream PCIe switch, the kernel bundles multiple GPUs and NICs into a single IOMMU group. Passing a single GPU into a VM requires passing all devices within that IOMMU group.
+   
+   Applying the kernel parameter `pci=noacs` or custom ACS override patches breaks kernel memory isolation and can cause silent data corruption or disable PCIe Peer-to-Peer (P2P) DMA routing.
+
+2. **Base Address Register (BAR1) Sizing for 80GB+ GPUs**:
+   Accelerators map GPU memory into CPU addressable space via PCIe Base Address Registers. **BAR1** is used by the host OS and peer devices to access GPU VRAM directly. 
+   
+   Older hypervisor virtual BIOS configurations default to a **256 MiB BAR1 window**. When passing an 80GB A100 or H100 GPU, this legacy window causes driver initialization failure (`NVRM: BAR1 is too small`) and prevents GPUDirect P2P transfers. The hypervisor VM must be explicitly configured with **64-bit PCI MMIO mapping** enabled and an aperture size of at least `128 GiB` per physical GPU (e.g., `qemu -global q35-pcihost.pci-hole64-size=512G`).
 
 ---
 
-### Practice 2: Explicit `RuntimeClass: nvidia` & Zero-Privilege Inference Containers
+## 1.4 Multi-Tenant Quota & Fair-Share Orchestration
 
-A widespread anti-pattern inherited from legacy Docker workflows (`docker run --privileged ...`) is deploying inference pods with `securityContext.privileged: true`.
-- **Why `privileged: true` is catastrophic**: A privileged container sees **every physical GPU** on the host (`/dev/nvidia0`..`/dev/nvidia7`), bypasses Device Plugin isolation, can read co-tenant GPU memory, and gives full host root capabilities if a model server or Python dependency suffers a Remote Code Execution (RCE) vulnerability.
-- **Correct Pattern**: Define an explicit `RuntimeClass` (`handler: nvidia`) with `scheduling.nodeSelector` and `tolerations` (see [`nvidia-runtimeclass.yaml`](../manifests/01-hardware-orchestration/nvidia-runtimeclass.yaml)), set `runtimeClassName: nvidia` on the Pod, and drop all Linux capabilities:
+Standard Kubernetes `ResourceQuota` operates as an absolute hard ceiling within an individual namespace:
+- If `team-inference` is granted 16 GPUs but currently utilizes only 8, the remaining 8 GPUs remain idle.
+- If `team-batch` has queued research jobs, those jobs cannot utilize the idle GPUs because Kubernetes quotas cannot dynamically lend or borrow resources across namespaces.
+
+Modern AI platforms deploy **Hierarchical Fair-Share Scheduling** using either **Run:ai (KAI Scheduler)** or **Kubernetes-SIGs Kueue**.
+
+```mermaid
+flowchart TD
+    Cohort["Cohort: ai-supercomputing-cohort (Total Capacity: 24x H100)"]
+    
+    subgraph Queues["ClusterQueues"]
+        Prod["ClusterQueue: cq-inference-prod\nNominal Quota: 16 GPUs\nBorrowing Limit: 8 GPUs\nPreemption: ReclaimWithinCohort = Any"]
+        Batch["ClusterQueue: cq-research-batch\nNominal Quota: 8 GPUs\nBorrowing Limit: 16 GPUs\nLending Limit: 8 GPUs\nPreemption: ReclaimWithinCohort = Never"]
+    end
+
+    Cohort --> Prod
+    Cohort --> Batch
+
+    Batch -. "Off-Peak: Borrows 8 idle GPUs (Runs 16 GPUs)" .-> Prod
+    Prod == "Production Traffic Burst: Preempts batch jobs and reclaims 8 GPUs" ==> Batch
+```
+
+### Architectural Comparison: Run:ai (KAI Scheduler) vs. Kubernetes-SIGs Kueue
+
+| Capability | Run:ai (KAI Scheduler) | Kubernetes-SIGs Kueue |
+| :--- | :--- | :--- |
+| **Architecture** | Proprietary / Apache 2.0 open-sourced replacement `kube-scheduler` | Native Kubernetes Controller operating as an admission gate for workloads |
+| **Workload Abstractions** | Custom Workload CRDs, standard Deployments, StatefulSets | Batch `Job`, Ray `RayJob`/`RayCluster`, PyTorch `MPIJob`, `LeaderWorkerSet` |
+| **Queue Hierarchy** | Multi-level tree (Root -> Department -> Project Queues) | `Cohort` groupings linking multiple `ClusterQueue` resources |
+| **Borrowing Mechanism** | Dynamic borrowing based on `overQuotaWeight` ratios | Declarative `borrowingLimit` and `lendingLimit` per resource flavor |
+| **Preemption Engine** | Direct kernel pod eviction and GPU context reset | Preempts workloads at the Kueue admission level via graceful eviction |
+| **Scheduling Decision Point** | Replaces Kubernetes scheduling cycle | Suspends pods (`spec.suspend: true`) until quota is granted, then hands to `kube-scheduler` |
+
+See [`kueue-gpu-clusterqueue.yaml`](../manifests/01-hardware-orchestration/kueue-gpu-clusterqueue.yaml) for production configurations of `ResourceFlavor`, `ClusterQueue`, and cohort borrowing definitions.
+
+#### Preemption Policy Matrix in Kueue
+
+When designing multi-tenant clusters, configure Kueue preemption rules to prevent serving degradation:
+- **`reclaimWithinCohort: Any`**: High-priority production queues can reclaim their nominal quota by evicting any borrowing workload from peer queues within the cohort.
+- **`withinClusterQueue: LowerPriority`**: Within the same queue, higher-priority inference pods preempt lower-priority pods.
+- **`borrowWithinCohort: policy: Never`**: Critical production queues never borrow above their limit if it risks being evicted later, ensuring latency guarantees remain intact.
+
+---
+
+## 1.5 Hardening Practices & Day-2 Verification
+
+### Practice 1: Zero-Privilege Inference Containers and Explicit RuntimeClass
+
+Running GPU containers with `securityContext.privileged: true` exposes all physical host character devices (`/dev/nvidia0` through `/dev/nvidia7`), bypasses Device Plugin isolation, and invalidates multi-tenancy guarantees.
+
+Inference pods must declare `runtimeClassName: nvidia` (see [`nvidia-runtimeclass.yaml`](../manifests/01-hardware-orchestration/nvidia-runtimeclass.yaml)) and drop all Linux capabilities:
 
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: vllm-secure-predictor
+  name: vllm-inference-secure
   namespace: ai-inference
 spec:
-  runtimeClassName: nvidia              # Invokes nvidia-container-toolkit OCI/CDI hook
-  automountServiceAccountToken: false   # Model servers rarely need K8s API access
+  runtimeClassName: nvidia
+  automountServiceAccountToken: false
   containers:
-    - name: vllm
+    - name: vllm-engine
       image: vllm/vllm-openai:v0.6.4
       securityContext:
         privileged: false
         allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
         capabilities:
           drop: ["ALL"]
       resources:
         limits:
-          nvidia.com/gpu: "1"           # Device Plugin injects ONLY the assigned GPU UUID
+          nvidia.com/gpu: "1"
+          cpu: "8"
+          memory: "32Gi"
 ```
 
-You can audit any cluster for `privileged: true` violations, missing `runtimeClassName: nvidia`, and wildcard secret bindings with `kubectl` or the companion CLI:
+### Auditing Cluster Isolation with `kubectl`
+
+Run this script to locate GPU pods running as privileged or missing explicit `RuntimeClass`:
+
 ```bash
-# Pure kubectl check for GPU pods missing runtimeClassName: nvidia or running privileged
 kubectl get pods -A -o json | jq -r '
   .items[]
   | select(.spec.containers[].resources.limits."nvidia.com/gpu" != null)
   | select(.spec.runtimeClassName != "nvidia" or (.spec.containers[].securityContext.privileged == true))
-  | "\(.metadata.namespace)/\(.metadata.name) runtimeClass=\(.spec.runtimeClassName) privileged=\(.spec.containers[0].securityContext.privileged)"
+  | "VIOLATION: \(.metadata.namespace)/\(.metadata.name) runtimeClass=\(.spec.runtimeClassName // "none") privileged=\(.spec.containers[0].securityContext.privileged // false)"
 '
-
-# Companion KubeVRAM CLI check
-kubevram rbac-audit
 ```
 
----
+### Day-2 Command Bridge: Linux Bare-Metal to Kubernetes
 
-### Practice 3: Hierarchical Fair-Share Quotas with Run:ai (KAI Scheduler) or Kueue
-
-Standard Kubernetes `ResourceQuota` enforces hard static ceilings per namespace:
-- If `team-chat-prod` has a `ResourceQuota` of `16` H100 GPUs and only uses `10` off-peak, the `6` idle GPUs sit dark while `team-eval-batch` sits queued in `Pending`.
-- Conversely, without quotas, a single batch evaluation job can monopolize the entire cluster and block production autoscaling.
-
-**Run:ai (open-sourced as KAI Scheduler under Apache 2.0)** and **Kubernetes Kueue** introduce **Hierarchical Fair-Share Queues** (see [`nvidia-runtimeclass.yaml`](../manifests/01-hardware-orchestration/nvidia-runtimeclass.yaml)):
-
-```mermaid
-flowchart TD
-    Root["Cluster Queue: ai-platform (24x H100 Total)"]
-    Root --> Prod["Queue: llm-inference-prod\nQuota (Guaranteed): 16 GPUs\nLimit (Max Burst): 24 GPUs\nPriority: 100 (Non-Preemptible)"]
-    Root --> Batch["Queue: ml-research-batch\nQuota (Guaranteed): 8 GPUs\nLimit (Max Burst): 24 GPUs\nPriority: 50 (Preemptible)"]
-
-    Batch -. "Off-peak: Borrows 6 idle GPUs from Prod (Runs 14 GPUs)" .-> Prod
-    Prod == "Traffic Spike: Reclaims 6 GPUs via graceful preemption" ==> Batch
-```
-
-Key operational rules for GPU Queue design:
-1. **Separate Latency-Critical Online Inference from Preemptible Batch Inference**: Online KServe/vLLM replicas must use a non-preemptible high-priority class (`priority >= 100`) so live user streams are never evicted mid-generation.
-2. **Make Offline Batch / Fine-Tuning / Eval Workloads Checkpoint- & Preemption-Safe**: Batch jobs that borrow idle over-quota GPUs (`quota: 8, limit: 24`) must handle `SIGTERM` gracefully and persist progress to object storage/PVC so reclamation is lossless.
-3. **Track GPU-Hours by Queue**: Combine `DCGM_FI_DEV_FB_USED` and `DCGM_FI_PROF_SM_ACTIVE` with queue labels to distinguish **allocated GPUs** from **actually utilized GPUs**.
-
----
-
-## 1.4 Day-2 Verification & Linux-to-Kubernetes Bridge
-
-| Linux / Bare-Metal Command | Kubernetes + GPU Operator Equivalent | KubeVRAM Shortcut |
+| Bare-Metal Linux Command | Kubernetes GPU Operator Equivalent | KubeVRAM Companion Shortcut |
 | :--- | :--- | :--- |
 | `lspci \| grep -i nvidia` | `kubectl get nodes -l feature.node.kubernetes.io/pci-10de.present=true` | `kubevram bridge driver` |
-| `lsmod \| grep nvidia && modinfo nvidia` | `kubectl get pods -n gpu-operator -l app.kubernetes.io/component=nvidia-driver -o wide` | `kubevram bridge driver` |
-| `nvidia-smi -L` | `kubectl get nodes -o custom-columns=NODE:.metadata.name,SKU:.metadata.labels.'nvidia\.com/gpu\.product',GPUS:.status.allocatable.'nvidia\.com/gpu'` | `kubevram topology` |
-| `cat /etc/containerd/config.toml` | `kubectl get runtimeclass nvidia -o yaml && kubectl logs -n gpu-operator -l app=nvidia-operator-validator` | `kubevram rbac-audit` |
+| `cat /proc/driver/nvidia/version` | `kubectl get pods -n gpu-operator -l app=nvidia-driver-daemonset -o wide` | `kubevram bridge driver` |
+| `nvidia-smi -L` | `kubectl get nodes -o custom-columns=NODE:.metadata.name,MODEL:.metadata.labels.'nvidia\.com/gpu\.product',ALLOC_GPUS:.status.allocatable.'nvidia\.com/gpu'` | `kubevram topology` |
+| `dmesg \| grep -i NVRM` | `kubectl logs -n gpu-operator -l app=nvidia-operator-validator` | `kubevram rbac-audit` |
+| `cat /etc/cdi/nvidia.yaml` | `kubectl exec -n gpu-operator ds/nvidia-container-toolkit-daemonset -- cat /var/run/cdi/nvidia.yaml` | `kubevram bridge driver` |

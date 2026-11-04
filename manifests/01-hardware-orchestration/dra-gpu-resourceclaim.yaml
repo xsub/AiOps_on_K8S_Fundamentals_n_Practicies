@@ -1,0 +1,68 @@
+# Kubernetes Dynamic Resource Allocation (DRA resource.k8s.io/v1beta1)
+# Demonstrates DeviceClass, ResourceClaimTemplate, CEL Selector filtering, and CDI injection for NVIDIA GPUs
+apiVersion: resource.k8s.io/v1beta1
+kind: DeviceClass
+metadata:
+  name: gpu.nvidia.com
+spec:
+  selectors:
+    - cel:
+        expression: "device.driver == 'gpu.nvidia.com'"
+---
+apiVersion: resource.k8s.io/v1beta1
+kind: ResourceClaimTemplate
+metadata:
+  name: h100-gpu-claim-template
+  namespace: ai-inference
+spec:
+  spec:
+    devices:
+      requests:
+        - name: req-gpu-primary
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: 1
+          selectors:
+            - cel:
+                expression: "device.attributes['gpu.nvidia.com'].model.matches('H100.*')"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-dra-inference
+  namespace: ai-inference
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  resourceClaims:
+    - name: gpu-claim
+      resourceClaimTemplateName: h100-gpu-claim-template
+  containers:
+    - name: vllm-inference
+      image: vllm/vllm-openai:v0.6.4
+      command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+      args:
+        - "--model=meta-llama/Meta-Llama-3.1-8B-Instruct"
+        - "--gpu-memory-utilization=0.90"
+        - "--max-model-len=8192"
+      resources:
+        claims:
+          - name: gpu-claim
+        limits:
+          cpu: "16"
+          memory: "64Gi"
+        requests:
+          cpu: "16"
+          memory: "64Gi"
+      securityContext:
+        privileged: false
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+  volumes:
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi

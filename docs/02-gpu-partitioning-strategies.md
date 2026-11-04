@@ -1,174 +1,325 @@
 # 2. GPU Partitioning & Sharing Strategies (Hypervisor & Kubernetes)
 
-> **Related Manifests**: [`mig-parted-configmap.yaml`](../manifests/02-gpu-partitioning/mig-parted-configmap.yaml) | [`time-slicing-and-mps-configmap.yaml`](../manifests/02-gpu-partitioning/time-slicing-and-mps-configmap.yaml)  
-> **Companion CLI ([`KubeVRAM`](https://github.com/xsub/KubeVRAM))**: `kubevram partition --gpu H100-80GB --workload vllm --tenants multi --emit-configmap` | `kubevram bridge mig`
+> **Related Manifests**:
+> - [`mig-parted-configmap.yaml`](../manifests/02-gpu-partitioning/mig-parted-configmap.yaml)
+> - [`time-slicing-and-mps-configmap.yaml`](../manifests/02-gpu-partitioning/time-slicing-and-mps-configmap.yaml)  
+>
+> **Companion CLI ([`KubeVRAM`](https://github.com/xsub/KubeVRAM))**: `kubevram partition` | `kubevram bridge mig`
 
 ---
 
-## 2.1 Sharing NVIDIA GPUs on Hypervisor Machines (VM Infrastructure Layer)
+## 2.1 Sharing NVIDIA GPUs on Hypervisor Infrastructure
 
-Before a GPU ever reaches `kubelet` inside a Kubernetes worker node, enterprise on-premises and private-cloud clusters frequently run Kubernetes atop **Type-1 Hypervisors** (**KVM/QEMU, Proxmox VE, Red Hat OpenShift Virtualization / KubeVirt, VMware vSphere ESXi, OpenStack Nova**).
-
-When designing an AI inference platform on virtualized hosts, infrastructure engineers must first choose **how the hypervisor exposes physical NVIDIA GPUs to Guest Kubernetes Worker VMs**, because that choice dictates what sharing modes and GPU Operator settings are valid inside Kubernetes.
+Enterprise AI platforms frequently run Kubernetes atop **Type-1 Hypervisors** (KVM/QEMU, Red Hat OpenShift Virtualization / KubeVirt, Proxmox VE, VMware vSphere ESXi). The hypervisor architecture dictates how physical GPUs are exposed to Guest Kubernetes Worker VMs, establishing the boundaries for what sharing mechanisms can be configured inside the cluster.
 
 ```mermaid
-flowchart TB
-    subgraph ModeA["Mode A: VFIO PCIe Passthrough (1:1 Physical GPU -> VM)"]
-        H_A["Physical GPU (H100 / L40S)"] -->|"IOMMU + vfio-pci"| VM_A["K8s Worker VM (Full PCIe Control)"]
-        VM_A -->|"GPU Operator driver.enabled=true"| Pod_A["K8s Pods: Full GPU, Guest MIG, MPS, or Time-Slicing"]
+flowchart TD
+    subgraph Host["Physical Server Hardware"]
+        PhysGPU["Physical GPU (NVIDIA A100 / H100 / L40S)"]
     end
 
-    subgraph ModeB["Mode B: Hypervisor Time-Sliced NVIDIA vGPU"]
-        H_B["Physical GPU + Host nvidia-vgpu-mgr"] -->|"MDEV / SR-IOV VF"| VM_B1["K8s Worker VM 1 (vGPU Profile e.g. L40S-24Q)"]
-        H_B -->|"MDEV / SR-IOV VF"| VM_B2["K8s Worker VM 2 (vGPU Profile e.g. L40S-24Q)"]
-        VM_B1 -->|"vGPU Guest Driver + NLS License"| Pod_B1["K8s Pods (Fixed VF VRAM, Time-Sliced SMs)"]
+    subgraph Hypervisor["Hypervisor Layer (KVM / ESXi)"]
+        VFIO["Mode A: VFIO-PCI Passthrough\n(Raw PCIe device binding)"]
+        vGPU_TS["Mode B: Time-Sliced vGPU\n(Host nvidia-vgpu-mgr / MDEV)"]
+        vGPU_MIG["Mode C: MIG-Backed vGPU\n(SR-IOV VF mapped to hardware MIG)"]
     end
 
-    subgraph ModeC["Mode C: SR-IOV + Hardware MIG-Backed vGPU (Ampere/Hopper/Blackwell)"]
-        H_C["Physical H100/A100 + Host MIG + SR-IOV"] -->|"VF 0 (Hardware MIG 3g.40gb)"| VM_C1["Tenant A K8s Worker VM"]
-        H_C -->|"VF 1 (Hardware MIG 2g.20gb)"| VM_C2["Tenant B K8s Worker VM"]
-        H_C -->|"VF 2 (Hardware MIG 2g.20gb)"| VM_C3["Tenant C K8s Worker VM"]
+    subgraph VMs["Kubernetes Worker VMs"]
+        VM_A["K8s Worker VM A\n(Runs GPU Operator with Data Center Driver)"]
+        VM_B["K8s Worker VM B\n(Runs vGPU Guest Driver + NLS Token)"]
+        VM_C["K8s Worker VM C\n(Runs vGPU Guest Driver + NLS Token)"]
     end
+
+    PhysGPU --> VFIO --> VM_A
+    PhysGPU --> vGPU_TS --> VM_B
+    PhysGPU --> vGPU_MIG --> VM_C
 ```
 
-### Hypervisor Sharing Approaches Compared
+### Hypervisor Modes Compared
 
-| Hypervisor Mode | Underlying Mechanism | VRAM Isolation Across VMs | Compute (SM) Isolation Across VMs | NVIDIA Licensing Required? | GPU Operator `ClusterPolicy` Impact |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **1. VFIO PCIe Passthrough** | Linux IOMMU (`intel_iommu=on` / `amd_iommu=on`) binds raw PCIe BDF (`0000:c1:00.0`) via `vfio-pci` directly into 1 VM. | **Strict** (100% physical GPU dedicated to 1 VM). | **Strict** (Zero hypervisor scheduling overhead; supports NVLink pass-through when all linked GPUs + NVSwitches pass to same VM). | **No** (Standard Data Center driver). | Standard bare-metal mode: `driver.enabled: true` (datacenter image), `migManager.enabled: true`. |
-| **2. Time-Sliced NVIDIA vGPU** | Host hypervisor runs `nvidia-vgpu-mgr`; exposes Virtual Functions (SR-IOV / MDEV) such as `L40S-12Q` or `A100-20C`. | **Enforced per VF** by hypervisor MMU (unlike K8s software time-slicing!). | **Temporal (Time-Sliced)** across VMs (`best_effort`, `equal_share`, or `fixed_share` scheduler). | **Yes** (NVIDIA AI Enterprise / vCS NLS token). | Requires **vGPU Guest Driver** container matching exact host `vgpu-kvm` branch + `licensingConfig` Secret; `migManager.enabled: false`. |
-| **3. MIG-Backed NVIDIA vGPU** | Ampere/Hopper/Blackwell SR-IOV + hardware MIG on hypervisor (`H100-2-20C`, `A100-3-40C`). | **Strict Silicon HBM Partition** per VM. | **Strict Silicon SM/L2 Partition** per VM (deterministic p99 latency across untrusted VMs). | **Yes** (NVIDIA AI Enterprise / vCS NLS token). | Requires **vGPU Guest Driver**; MIG is pre-sliced by hypervisor (`migManager.enabled: false` inside K8s; each VM sees `1` isolated GPU). |
+| Hypervisor Mode | Hardware Isolation | Interconnect Support | Licensing Overhead | Kubernetes GPU Operator Setup |
+| :--- | :--- | :--- | :--- | :--- |
+| **VFIO-PCI Passthrough** | 100% physical card dedicated to 1 VM. | Preserves full NVLink & GPUDirect RDMA. | **None** (Standard Data Center drivers). | `driver.enabled: true` (standard container image). Full control over MIG/MPS in K8s. |
+| **Time-Sliced vGPU** | Hypervisor MMU enforces virtual VRAM limits per VF; SMs are time-sliced. | NVLink disabled; RDMA emulated or high latency. | **Mandatory** (NVIDIA AI Enterprise NLS license per vGPU). | Requires **vGPU Guest Driver** container and NLS secret. `migManager.enabled: false`. |
+| **MIG-Backed vGPU** | Silicon-level HBM and SM isolation per Virtual Function (SR-IOV). | Limited P2P; isolated memory crossbars. | **Mandatory** (NVIDIA AI Enterprise NLS license per vGPU). | Requires **vGPU Guest Driver**. Host controls MIG slicing; K8s sees 1 whole GPU per VM. |
+
+#### vGPU Profiles: C-Series vs. Q-Series vs. B-Series
+When deploying virtualized nodes:
+- **C-Series (Compute / AI)**: Headless, optimized for CUDA computing, model inference, and deep learning training. Memory ECC is enabled by default. Example: `A100-4C` or `H100-20C`.
+- **Q-Series (Virtual Workstation)**: Designed for CAD, 3D visualization, and workstation rendering with full DirectX/OpenGL support alongside CUDA.
+- **B-Series (Virtual PC)**: Tailored for standard enterprise VDI desktop acceleration, lacking compute optimization.
 
 > [!IMPORTANT]
-> **Architectural Rule of Thumb for Hypervisors**:
-> - If a single Kubernetes cluster owns the physical server, **prefer VFIO PCIe Passthrough** into large Kubernetes GPU Worker VMs (1 VM per NUMA socket or 1 VM per node) and manage **MIG / MPS / Time-Slicing natively inside Kubernetes** via the NVIDIA GPU Operator. This avoids vGPU license overhead, eliminates host/guest driver version lockstep, and preserves full NVLink/GPUDirect RDMA performance.
-> - Use **MIG-Backed vGPU** only when you must isolate **separate, untrusted Kubernetes clusters** (hard VM kernel boundaries per customer) on the same physical A100/H100 host.
+> When a single Kubernetes cluster manages the entire physical host, **always deploy VFIO-PCI Passthrough**. Managing MIG, MPS, and Time-Slicing natively inside Kubernetes avoids hypervisor licensing fees, eliminates guest/host driver version lockstep, and preserves NVLink line-rate transfers. Reserve **MIG-Backed vGPU** strictly for multi-tenant private clouds where separate, untrusted Kubernetes clusters share a physical machine.
 
 ---
 
-## 2.2 The Kubernetes Fractional GPU Problem
+## 2.2 The Kubernetes Fractional GPU Dilemma
 
-Inside Kubernetes, `nvidia.com/gpu` is an indivisible integer (`1`, `2`, `4`, `8`). Submitting `nvidia.com/gpu: 0.25` fails API validation immediately. Yet real-world AI platforms run a heterogeneous mix of workloads alongside frontier LLMs:
-- **Guardrail & PII Classifiers** (`Llama-Guard-3-8B-INT8`, `DeBERTa-v3`): `1.5–8 GB` VRAM
-- **Dense Embeddings & Cross-Encoder Rerankers** (`BGE-M3`, `E5-Mistral-7B`, `NV-Embed`): `2–14 GB` VRAM
-- **Audio & Vision Microservices** (`Whisper-large-v3`, `PaddleOCR`, `YOLOv10`): `2–6 GB` VRAM
+Core Kubernetes advertises GPUs as indivisible integer units (`nvidia.com/gpu: 1`). Requesting fractional limits (`nvidia.com/gpu: 0.25`) fails Kubernetes API admission validation. 
 
-Allocating a dedicated 80GB H100 (\$30,000+ hardware) to a 4GB embedding pod wastes **95% of HBM3 memory** and **>85% of Streaming Multiprocessors (SMs)**.
+In production environments, modern AI platforms host a heterogeneous mix of models alongside frontier LLMs:
 
-NVIDIA provides three container-level sharing mechanisms via the GPU Operator: **Time-Slicing**, **Multi-Instance GPU (MIG)**, and **CUDA Multi-Process Service (MPS)**.
+| Workload Category | Typical Architecture | Required VRAM | Target GPU Footprint |
+| :--- | :--- | :--- | :--- |
+| **Frontier LLMs** | `Llama-3.1-70B`, `Qwen-2.5-72B` (FP8) | `70–80 GiB` | 1x Dedicated H100 or 2x L40S |
+| **Mid-Size LLMs** | `Mistral-Small-24B`, `Qwen-2.5-14B` (FP8) | `24–36 GiB` | 1x MIG `3g.40gb` or 1x L40S |
+| **Small Task Models** | `Llama-3.1-8B-Instruct`, `Gemma-2-9B` | `14–18 GiB` | 1x MIG `2g.20gb` |
+| **Embeddings & Rerankers** | `BGE-M3`, `E5-Mistral-7B`, `NV-Embed` | `4–12 GiB` | 1x MIG `1g.10gb` or CUDA MPS |
+| **Audio & OCR Services** | `Whisper-large-v3`, `PaddleOCR`, `YOLOv10` | `2–6 GiB` | 1x MIG `1g.10gb` or CUDA MPS |
+
+Binding an entire \$30,000+ 80GB H100 to a 4GB embedding service wastes **95% of HBM3 memory** and **>85% of compute capacity**. Kubernetes engineers must deploy one of three partitioning strategies: **MIG**, **CUDA MPS**, or **Time-Slicing**.
 
 ```mermaid
 flowchart LR
-    subgraph TS["1. Time-Slicing (Software Context Switching)"]
-        TS_GPU["Physical GPU (48GB / 80GB Shared VRAM)"]
-        TS_P1["Pod A (NVML reports full 48GB!)"]
-        TS_P2["Pod B (NVML reports full 48GB!)"]
-        TS_P1 -. "Quantum T1 (Pre-allocates 90% -> 43.2GB)" .-> TS_GPU
-        TS_P2 -. "Quantum T2 (Needs 14GB -> CRASH Exit 1!)" .-> TS_GPU
+    subgraph MIG["1. Hardware MIG (Silicon Partition)"]
+        M1["MIG 3g.40gb\n(Dedicated SMs + 40GB HBM)"]
+        M2["MIG 2g.20gb\n(Dedicated SMs + 20GB HBM)"]
+        M3["MIG 1g.10gb\n(Dedicated SMs + 10GB HBM)"]
     end
 
-    subgraph MIG["2. Multi-Instance GPU (Hardware Silicon Partitioning)"]
-        MIG_1["MIG 3g.40gb (Dedicated SMs + 40GB HBM)"]
-        MIG_2["MIG 2g.20gb (Dedicated SMs + 20GB HBM)"]
-        MIG_3["MIG 1g.10gb (Dedicated SMs + 10GB HBM)"]
-        MIG_P1["vLLM 14B Pod (Sees 40GB)"] --> MIG_1
-        MIG_P2["vLLM 8B Pod (Sees 20GB)"] --> MIG_2
-        MIG_P3["Reranker Pod (Sees 10GB)"] --> MIG_3
+    subgraph MPS["2. CUDA MPS (Shared Context)"]
+        MD["MPS Control Daemon\n(Unified Context & Spatial Concurrency)"]
+        MP1["Embedder (SM: 40%, Cap: 12GB)"] --> MD
+        MP2["Reranker (SM: 60%, Cap: 16GB)"] --> MD
     end
 
-    subgraph MPS["3. CUDA MPS (Single-Context Kernel Overlap)"]
-        MPS_D["MPS Control Daemon (Unified CUDA Context)"]
-        MPS_GPU["Physical L40S / A10G GPU"]
-        MPS_P1["Embedder (SM 40%, Mem Cap 12GB)"] --> MPS_D
-        MPS_P2["Reranker (SM 60%, Mem Cap 16GB)"] --> MPS_D
-        MPS_D --> MPS_GPU
+    subgraph TS["3. Time-Slicing (Temporal)"]
+        TD["Hardware Scheduler\n(Round-Robin Context Switch)"]
+        TP1["Container A (Sees Full VRAM)"] --> TD
+        TP2["Container B (Sees Full VRAM)"] --> TD
     end
 ```
 
 ---
 
-## 2.3 Deep Technical Breakdown: Time-Slicing vs. MIG vs. MPS
+## 2.3 MIG Silicon Internals & Placement Constraints
 
-### 1. GPU Time-Slicing (Temporal Software Multiplexing)
+**Multi-Instance GPU (MIG)** provides hardware-level silicon partitioning on NVIDIA Ampere (`A100`, `A30`), Hopper (`H100`, `H200`), and Blackwell (`B100`, `B200`) GPUs.
 
-- **Mechanism**: Configured via a ConfigMap passed to `devicePlugin.config` (see [`time-slicing-and-mps-configmap.yaml`](../manifests/02-gpu-partitioning/time-slicing-and-mps-configmap.yaml)). Setting `replicas: 4` causes the NVIDIA Device Plugin to register `4` virtual `nvidia.com/gpu` tokens per physical GPU (`gpu-0::0`, `gpu-0::1`, `gpu-0::2`, `gpu-0::3`) and label the node `nvidia.com/gpu.sharing-strategy=time-slicing`.
-- **Execution**: Multiple containers bind directly to the same physical GPU. The NVIDIA hardware compute engine preempts and context-switches CUDA streams in round-robin time slices.
-- **Zero Memory or Fault Isolation**:
-  1. Every container queries `nvmlDeviceGetMemoryInfo()` and sees **100% of physical VRAM** (e.g., `48.0 GiB` on L40S or `80.0 GiB` on H100).
-  2. **Why vLLM Fails Catastrophically on Time-Slicing**: On startup, `vLLM` profiles free memory and reserves `total_vram * gpu_memory_utilization` (`0.90` by default) for model weights and PagedAttention KV-cache blocks. Pod 1 claims `43.2 GiB` of a `48 GiB` L40S. Moments later, Pod 2 lands on replica `gpu-0::1`, sees only `4.8 GiB` free, and enters an infinite `CrashLoopBackOff` (`Exit Code 1`, `torch.cuda.OutOfMemoryError`).
-  3. **Noisy-Neighbor Latency**: Context-switching massive LLM KV states stalls all co-located tenants, spiking p99 Time-Per-Output-Token (TPOT).
+### GPU Instances (GI) vs. Compute Instances (CI)
+
+MIG divides the physical GPU into two hierarchical layers:
+1. **GPU Instance (GI)**: Partitions the physical memory subsystem, including HBM3 memory controllers, crossbar paths, L2 cache banks, and fault isolation domains. A GI represents a hardware-isolated boundary.
+2. **Compute Instance (CI)**: Partitions Streaming Multiprocessors (SMs) within an existing GPU Instance. All CIs inside a single GI share that GI’s memory controller, L2 cache, and memory bandwidth.
+
+```mermaid
+flowchart TD
+    subgraph PhysicalGPU["Physical A100 / H100 (80GB HBM)"]
+        GI1["GPU Instance 1: 3g.40gb\n(40GB HBM, 4 L2 Banks, 42 SMs)"]
+        GI2["GPU Instance 2: 2g.20gb\n(20GB HBM, 2 L2 Banks, 28 SMs)"]
+        GI3["GPU Instance 3: 1g.10gb\n(10GB HBM, 1 L2 Bank, 14 SMs)"]
+        GI4["GPU Instance 4: 1g.10gb\n(10GB HBM, 1 L2 Bank, 14 SMs)"]
+    end
+
+    subgraph CI_Layer["Compute Instance Sub-division"]
+        GI1 --> CI1["CI: 3c.3g.40gb (All 42 SMs)"]
+        GI2 --> CI2A["CI: 1c.2g.20gb (14 SMs)"]
+        GI2 --> CI2B["CI: 1c.2g.20gb (14 SMs)"]
+    end
+```
+
+---
+
+### Memory Slice Placement & Binary Buddy Alignment
+
+A physical 80GB A100 or H100 GPU features **8 physical Memory Controllers** (0 through 7) and **7 Compute Slices** (0 through 6). Because memory channels are hard-wired across silicon crossbars, you **cannot provision arbitrary profile combinations**.
+
+The hardware memory crossbar follows **binary buddy allocation rules**:
+- Slices must be placed at contiguous physical memory address boundaries corresponding to powers of two.
+- A `3g.40gb` profile requires 4 contiguous memory slices. It can only occupy Memory Slices `[0, 1, 2, 3]` or `[4, 5, 6, 7]`.
+- A `2g.20gb` profile requires 2 contiguous memory slices. It can only be placed at boundaries `[0, 1]`, `[2, 3]`, `[4, 5]`, or `[6, 7]`.
+- A `1g.10gb` profile requires 1 memory slice and can fit into any free slot.
+
+#### Valid Placement Combinations on 80GB Hardware
+
+| Valid Hardware Configuration | Slice 0–1 | Slice 2–3 | Slice 4–5 | Slice 6–7 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Profile A: Balanced Multi-Tenant** | `2g.20gb` | `2g.20gb` | `1g.10gb` + `1g.10gb` | `1g.10gb` + `1g.10gb` |
+| **Profile B: Dual Mid-Size Serving** | `3g.40gb` (Uses 0–3) | `3g.40gb` (Uses 0–3) | `3g.40gb` (Uses 4–7) | `3g.40gb` (Uses 4–7) |
+| **Profile C: Uniform Microservices** | `1g.10gb` x2 | `1g.10gb` x2 | `1g.10gb` x2 | `1g.10gb` (7th slice) |
+| **Invalid Combination Example** | `3g.40gb` (0–3) | *(Occupied)* | `2g.20gb` (4–5) | `2g.20gb` (Crosses boundary!) |
+
+> [!WARNING]
+> Attempting to create an unaligned combination (such as two `3g.40gb` instances and one `2g.20gb` instance) fails at the NVML level with `NVML_ERROR_INVALID_ARGUMENT`.
+
+#### Pod Resource Requests Under `mixed` MIG Strategy
+
+When using the `mixed` strategy (see [`mig-parted-configmap.yaml`](../manifests/02-gpu-partitioning/mig-parted-configmap.yaml)), workloads request specific slice geometries directly in `resources.limits`:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-llama8b-mig
+  namespace: ai-inference
+spec:
+  containers:
+    - name: vllm-worker
+      image: vllm/vllm-openai:v0.6.4
+      resources:
+        limits:
+          nvidia.com/mig-2g.20gb: "1"
+          cpu: "8"
+          memory: "32Gi"
+```
+
+---
+
+### Dynamic Reconfiguration via `mig-parted`
+
+The NVIDIA GPU Operator includes the **MIG Manager** (`nvidia-mig-manager`), which uses `mig-parted` to apply declarative profiles defined in a ConfigMap:
+
+```mermaid
+sequenceDiagram
+    participant Admin as Platform Engineer
+    participant API as Kube-APIServer
+    participant MM as nvidia-mig-manager
+    participant NVML as NVML / Hardware Kernel
+    participant GFD as GPU Feature Discovery
+
+    Admin->>API: kubectl label node <node> nvidia.com/mig.config=all-balanced --overwrite
+    MM->>API: Detects node label change
+    MM->>API: Cordon & drain GPU pods on target node
+    MM->>NVML: Verifies zero open file handles on /dev/nvidia*
+    MM->>NVML: Tears down old MIG instances & applies buddy geometry
+    NVML-->>MM: Hardware repartitioned successfully
+    MM->>API: Updates label nvidia.com/mig.config.state=success
+    GFD->>API: Advertises new resources (e.g., nvidia.com/mig-2g.20gb: 3)
+```
+
+---
+
+## 2.4 CUDA Multi-Process Service (MPS) Internals
+
+**CUDA MPS** enables multiple Linux processes to multiplex concurrently across a single GPU by sharing a unified CUDA context.
+
+### Control Daemon Architecture
+
+In standard CUDA execution, every container instantiates its own CUDA context, which consumes approximately `200–500 MiB` of VRAM per process and forces the GPU hardware compute engine to time-slice between contexts.
+
+CUDA MPS deploys an active background daemon:
+1. **Control Daemon (`nvidia-cuda-mps-control`)**: Listens on a UNIX domain socket (`/tmp/nvidia-mps/control`).
+2. **Server Process**: Maintains the shared CUDA context on the hardware.
+3. **Client Containers**: When an application makes CUDA runtime calls, the CUDA driver passes execution commands to the MPS server over local shared memory and IPC pipes. The hardware schedules kernels from different containers **concurrently in spatial parallel** across disjoint Streaming Multiprocessors.
+
+```mermaid
+flowchart TD
+    subgraph Clients["Client Containers"]
+        C1["Pod A: Embeddings\nCUDA_MPS_ACTIVE_THREAD_PERCENTAGE=40\nCUDA_MPS_PINNED_DEVICE_MEM_LIMIT=8192M"]
+        C2["Pod B: Reranker\nCUDA_MPS_ACTIVE_THREAD_PERCENTAGE=60\nCUDA_MPS_PINNED_DEVICE_MEM_LIMIT=16384M"]
+    end
+
+    subgraph MPSDaemon["Host MPS Architecture"]
+        Socket["Control Socket (/tmp/nvidia-mps)"]
+        Server["MPS Server Process\n(Single Shared Hardware CUDA Context)"]
+    end
+
+    subgraph Hardware["Physical GPU (L40S / A10G)"]
+        SMs["Streaming Multiprocessors\n(Spatial Concurrent Kernel Execution)"]
+    end
+
+    C1 --> Socket
+    C2 --> Socket
+    Socket --> Server
+    Server --> SMs
+```
+
+### Resource Enforcement in Device Plugin >= v0.15
+
+Modern NVIDIA Device Plugins natively configure MPS resource caps per container:
+- **`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE`**: Restricts the maximum percentage of Streaming Multiprocessors the container's threads can occupy simultaneously (e.g., `40` limits compute to 40% of SMs).
+- **`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`**: Configures a hard upper limit on pinned device VRAM allocation (e.g., `8192M` or `50%`). If the container exceeds this threshold, CUDA returns `cudaErrorMemoryAllocation`.
+
+### Blast-Radius Analysis & Security Boundaries
+
+Despite fine-grained memory limits, MPS suffers from a critical architectural limitation: **zero fault isolation**.
+- All MPS clients share the same underlying virtual address space and CUDA context.
+- If Container A triggers an unhandled CUDA hardware exception (such as an illegal memory access, kernel memory corruption, or out-of-bounds pointer dereference), the physical GPU resets the CUDA context.
+- **Result**: The MPS server crashes, terminating Container A **and all other co-located containers on that GPU simultaneously** (`CUDA error: an illegal memory access was encountered`).
 
 > [!CAUTION]
-> Never schedule default `vLLM`, `TGI`, or `SGLang` pods onto `time-slicing` nodes in production. If you must co-locate two cooperating engines on a non-MIG dev box, explicitly cap `--gpu-memory-utilization` below $\frac{0.85}{N_{\text{replicas}}}$ (e.g., `0.40` for 2 replicas).
+> Deploy CUDA MPS **only within trusted, cooperative microservice pipelines** (such as an embedding model and a reranker managed by the same team). Never deploy MPS across untrusted multi-tenant workloads.
 
 ---
 
-### 2. Multi-Instance GPU (MIG — Silicon-Level Hardware Partitioning)
+## 2.5 Time-Slicing & The Failure Math of LLM Serving
 
-- **Supported Silicon**: NVIDIA **Ampere** (`A100`, `A30`), **Hopper** (`H100`, `H200`), and **Blackwell** (`B100`, `B200`). *(Not available on Ada `L40S`/`L4`, Ampere consumer/graphics `A10G`/`A10`, or Turing `T4`.)*
-- **Hardware Architecture**: Physical A100/H100 80GB GPUs contain **7 Compute Slices** (`1g` each) and **8 Memory Slices** (`10 GB` each). MIG physically partitions the silicon crossbar, L2 cache banks, DRAM memory controllers, and SMs into independent **GPU Instances (GIs)**:
+GPU **Time-Slicing** multiplexes workloads temporally using the GPU's hardware context scheduler. The Device Plugin simply multiplies the advertised GPU count by a replication factor:
 
-| MIG Profile (80GB H100/A100) | Compute Fraction (SMs) | Dedicated HBM VRAM | Max Instances per GPU | Ideal Production Workload |
+```yaml
+# Extract from manifests/02-gpu-partitioning/time-slicing-and-mps-configmap.yaml
+sharing:
+  timeSlicing:
+    resources:
+      - name: nvidia.com/gpu
+        replicas: 4
+```
+
+Under this configuration, a 48GB L40S advertises `4` virtual GPUs (`gpu-0::0` through `gpu-0::3`). However, **no memory isolation or limits are enforced**.
+
+### The Mathematical Breakdown of vLLM / TGI Crashes
+
+Modern LLM serving engines (`vLLM`, `TGI`, `SGLang`) allocate GPU memory according to the following equation:
+
+$$VRAM_{\text{allocated}} = VRAM_{\text{weights}} + VRAM_{\text{KV-cache}} + VRAM_{\text{activations}}$$
+
+By default, `vLLM` computes available memory via `nvmlDeviceGetMemoryInfo()` and pre-allocates a continuous block:
+
+$$VRAM_{\text{target}} = VRAM_{\text{total}} \times \text{gpu\_memory\_utilization} \quad (\text{default} = 0.90)$$
+
+```mermaid
+sequenceDiagram
+    participant NVML as Physical GPU (80GB VRAM)
+    participant Pod1 as vLLM Pod 1 (gpu-0::0)
+    participant Pod2 as vLLM Pod 2 (gpu-0::1)
+
+    Pod1->>NVML: nvmlDeviceGetMemoryInfo() -> 80GB Total, 80GB Free
+    Pod1->>NVML: Pre-allocates 80GB * 0.90 = 72GB for Weights & KV Cache
+    Note over NVML: Available VRAM drops from 80GB to 8GB
+    Pod2->>NVML: nvmlDeviceGetMemoryInfo() -> 80GB Total, 8GB Free
+    Pod2->>Pod2: Attempts to allocate 72GB (0.90 * 80GB)
+    Pod2-->>Pod2: torch.cuda.OutOfMemoryError: Tried to allocate 72.00 GiB (GPU 0; 80.00 GiB total capacity; 8.00 GiB free)
+    Note over Pod2: CRASH: Exit Code 1 (CrashLoopBackOff)
+```
+
+1. Pod 1 starts on `gpu-0::0`. It inspects the physical GPU, sees `80 GiB` total, and claims `72 GiB` ($0.90 \times 80$) for model weights and PagedAttention KV-cache pools.
+2. Pod 2 schedules on `gpu-0::1`. It queries NVML, sees `80 GiB` total capacity with only `8 GiB` free, and immediately attempts to allocate `72 GiB`.
+3. Pod 2 crashes instantly with `torch.cuda.OutOfMemoryError: Tried to allocate 72.00 GiB (8.00 GiB free)`.
+
+### When Time-Slicing IS Appropriate
+Time-Slicing should be deployed strictly when:
+1. Workloads are stateless and do not pre-allocate VRAM pools (e.g., standard PyTorch/ONNX models using dynamic batching).
+2. Development and staging environments where idle engineers share expensive GPUs.
+3. Compute utilization is low and bursty, and memory consumption across all co-tenants satisfies:
+
+$$\sum_{i=1}^{N} VRAM_{\text{peak}}^{(i)} < 0.85 \times VRAM_{\text{total}}$$
+
+---
+
+## 2.6 Decision Matrix & Day-2 Verification
+
+| Partitioning Strategy | Full GPU (`none`) | Hardware **MIG** | **CUDA MPS** | **Time-Slicing** |
 | :--- | :--- | :--- | :--- | :--- |
-| **`1g.10gb`** | $1/7$ (~14%) | `10 GiB` | `7` | Embeddings (`BGE-M3`), Cross-Encoders, Whisper, OCR |
-| **`1g.20gb`** | $1/7$ (~14%) | `20 GiB` | `4` | Memory-heavy / low-QPS 7B–8B models with long KV cache |
-| **`2g.20gb`** | $2/7$ (~28%) | `20 GiB` | `3` | Production `Llama-3.1-8B-FP8` / `Mistral-7B` (`vLLM`) |
-| **`3g.40gb`** | $3/7$ (~43%) | `40 GiB` | `2` | `Qwen2.5-14B` / `32B-INT4/FP8`, Multimodal VLMs |
-| **`4g.40gb`** | $4/7$ (~57%) | `40 GiB` | `1` (+ `3g.40gb`) | Compute-intensive 14B–32B low-latency serving |
-| **`7g.80gb`** | $7/7$ (100%) | `80 GiB` | `1` | Full-GPU equivalent with MIG telemetry consistency |
+| **Supported Hardware** | All NVIDIA GPUs | A30, A100, H100, H200, B200 | Volta, Turing, Ampere, Ada, Hopper | All NVIDIA GPUs |
+| **Compute Execution** | Dedicated (100% SMs) | Spatial (Hardware-isolated SMs) | Spatial (Concurrent kernel execution) | Temporal (Context switching) |
+| **VRAM Isolation** | 100% Dedicated | **Hardware HBM Controller Isolation** | Pinned Memory Cap (Device Plugin >= v0.15) | **None** (Shared full VRAM) |
+| **Memory Bandwidth QoS** | Dedicated | Dedicated crossbars & L2 banks | Shared crossbar & L2 cache | Shared crossbar & L2 cache |
+| **Fault Isolation** | Physical GPU boundary | **Complete hardware fault containment** | **None** (Context crash kills all clients) | Partial (Process crash, OOM risk) |
+| **NVLink / P2P Support** | Full line rate | Disabled across slices | Single GPU scope | Single GPU scope |
+| **Production vLLM Safe?** | **Yes** | **Yes** (Engine sizes to slice VRAM) | Cautious (Strict mem caps + single tenant) | **NO** (Deterministic OOM crash) |
 
-- **Kubernetes Exposure Strategies (`mig.strategy` in `ClusterPolicy`)**:
-  1. **`single` strategy**: Every GPU on the node uses an identical homogeneous profile (e.g., `7x 1g.10gb` per GPU) and advertises them all under `nvidia.com/gpu: 56`. Simple for uniform microservice pools.
-  2. **`mixed` strategy** *(Recommended for heterogeneous AI platforms)*: Individual GPUs on the same 8-GPU node can hold different profiles (see [`mig-parted-configmap.yaml`](../manifests/02-gpu-partitioning/mig-parted-configmap.yaml)—e.g., GPUs `0–3` unpartitioned for TP=4 70B LLM, GPUs `4–5` as `3g.40gb`, GPUs `6–7` as `2g.20gb` + `1g.10gb`). Pods request explicit extended resources:
-     ```yaml
-     resources:
-       limits:
-         nvidia.com/mig-2g.20gb: "1"
-     ```
-- **Dynamic Reconfiguration via `mig-parted`**: Relabeling a node triggers the GPU Operator's `nvidia-mig-manager` automatically:
-  ```bash
-  kubectl label nodes gpu-node-a100-mig-02 nvidia.com/mig.config=all-balanced --overwrite
-  ```
-- **Critical MIG Constraints**:
-  1. **No NVLink P2P Across MIG Slices**: Standard MIG disables peer-to-peer NVLink transfers between slices. Do not run `TP=2` across two `3g.40gb` slices—use a full GPU or `TP=2` full GPUs instead!
-  2. **Reconfiguration Requires Idle GPU**: `nvidia-smi -i 0 -mig 1` fails if any container has `/dev/nvidia0` open; `mig-manager` handles draining GPU pods on label change.
-
----
-
-### 3. CUDA Multi-Process Service (MPS — Concurrent Kernel Overlap)
-
-- **Mechanism**: Deploys a node-level `nvidia-mps-control-daemon` that creates a **single shared CUDA context** on the physical GPU and proxies kernel launches from multiple client containers over UNIX domain sockets (`/tmp/nvidia-mps`).
-- **Why MPS Beats Time-Slicing on `L40S` / `L4` / `A10G`**:
-  - Non-MIG GPUs (`L40S-48GB`, `L4-24GB`, `A10G-24GB`) are heavily used in cloud instances (`g6e`, `g6`, `g5`).
-  - Under Time-Slicing, if an embedding container uses only 25% of the SMs, the remaining 75% of SMs sit idle during its time slice, and every context switch flushes caches.
-  - Under **CUDA MPS**, kernels from Container A (embedder) and Container B (reranker) run **simultaneously in spatial parallel** on disjoint SMs with zero context-switch penalty, and CUDA 12.x enforces per-client caps:
-    - `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` (compute SM ceiling)
-    - `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` (hard VRAM allocation ceiling per client!)
-- **Fatal Limitation (Blast Radius)**: All MPS clients share a single GPU virtual address space and CUDA context. If one container triggers an illegal memory access, segfault, or unrecoverable CUDA assert, **every co-located MPS client on that GPU experiences a fatal CUDA context reset**. Therefore, use MPS **only within a single trust domain** (e.g., microservices owned by the same team/pipeline), never across untrusted external tenants.
-
----
-
-## 2.4 Comprehensive Comparison & Decision Matrix
-
-| Dimension | Full GPU (`none`) | Hardware **MIG** | **CUDA MPS** | **Time-Slicing** |
-| :--- | :--- | :--- | :--- | :--- |
-| **Supported GPUs** | All NVIDIA GPUs | A30, A100, H100, H200, B200 | Volta, Turing, Ampere, Ada, Hopper | All NVIDIA GPUs |
-| **Compute Execution** | Exclusive (100% SMs) | Spatial (Dedicated hardware SMs) | Spatial (Shared context, SM % cap) | Temporal (Round-robin context switch) |
-| **VRAM Isolation** | 100% Exclusive | Hardware HBM Controller Isolated | Software Pinned Limit (CUDA 12+) | **None** (Shared full VRAM) |
-| **Memory Bandwidth QoS** | 100% Dedicated | Dedicated HBM crossbars & L2 | Shared HBM & L2 cache | Shared HBM & L2 cache |
-| **Fault Containment** | Per physical GPU | **Strict** (Fault stays in slice) | **Poor** (1 crash resets all clients) | **Poor** (OOM/XID hits co-tenants) |
-| **NVLink / P2P Support** | Yes (Full speed) | Disabled in standard MIG slices | Single-GPU scope | Single-GPU scope (`failRequestsGreaterThanOne: true`) |
-| **Safe for Production `vLLM`?** | **Yes** | **Yes** (vLLM sees slice VRAM) | Cautious (Single-tenant + mem cap) | **NO** (Fatal pre-allocation OOMs) |
-
-### Day-2 Verification (`kubectl`) & Automated Selection ([`KubeVRAM`](https://github.com/xsub/KubeVRAM))
+### Day-2 Verification Commands
 
 ```bash
-# Inspect active sharing strategies and MIG slices across all GPU worker nodes via kubectl
+# 1. Inspect allocated MIG slices across all cluster nodes
 kubectl get nodes -l nvidia.com/gpu.present=true \
-  -o custom-columns=NODE:.metadata.name,SKU:.metadata.labels.'nvidia\.com/gpu\.product',SHARING:.metadata.labels.'nvidia\.com/gpu\.sharing-strategy',MIG:.metadata.labels.'nvidia\.com/mig\.strategy',GPUS:.status.allocatable.'nvidia\.com/gpu',MIG_2G:.status.allocatable.'nvidia\.com/mig-2g\.20gb'
+  -o custom-columns=NODE:.metadata.name,MODEL:.metadata.labels.'nvidia\.com/gpu\.product',MIG_STRATEGY:.metadata.labels.'nvidia\.com/mig\.strategy',MIG_1G:.status.allocatable.'nvidia\.com/mig-1g\.10gb',MIG_2G:.status.allocatable.'nvidia\.com/mig-2g\.20gb',MIG_3G:.status.allocatable.'nvidia\.com/mig-3g\.40gb'
 
-# Companion KubeVRAM CLI: Evaluate SKU + workload + tenancy and emit GPU Operator ConfigMaps
-kubevram partition --gpu H100-80GB --workload vllm --tenants multi --model-vram 16 --emit-configmap
-kubevram partition --gpu A10G-24GB --workload embeddings --tenants multi --model-vram 4 --emit-configmap
-kubevram partition --gpu L40S-48GB --workload dev-notebook --tenants multi --emit-configmap
+# 2. Inspect physical MIG instances directly via NVML on a worker node
+kubectl exec -n gpu-operator ds/nvidia-device-plugin-daemonset -- nvidia-smi mig -lgi
+
+# 3. Companion KubeVRAM CLI commands for partitioning validation
+kubevram partition --gpu H100-80GB --workload vllm --tenants multi --emit-configmap
+kubevram bridge mig
 ```

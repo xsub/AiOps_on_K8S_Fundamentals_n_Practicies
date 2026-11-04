@@ -1,0 +1,88 @@
+# Kubernetes 1.30+ Native CEL ValidatingAdmissionPolicy & ValidatingAdmissionPolicyBinding
+# Production Guardrails for GPU Inference Workloads
+# Enforces:
+# 1. Reject GPU pods (nvidia.com/gpu) in non-system namespaces with securityContext.privileged == true
+# 2. Require spec.runtimeClassName == "nvidia" on pods requesting nvidia.com/gpu
+# 3. Require a memory-backed emptyDir mounted at /dev/shm on multi-GPU pods (nvidia.com/gpu >= 2)
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gpu-inference-security-guardrails
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    # Check if any container requests or limits nvidia.com/gpu
+    - name: gpuContainers
+      expression: >
+        object.spec.containers.filter(c,
+          has(c.resources) && (
+            (has(c.resources.limits) && has(c.resources.limits["nvidia.com/gpu"])) ||
+            (has(c.resources.requests) && has(c.resources.requests["nvidia.com/gpu"]))
+          )
+        )
+    - name: isGPUPod
+      expression: variables.gpuContainers.size() > 0
+    # Multi-GPU check: any container requesting or limiting nvidia.com/gpu >= 2
+    - name: isMultiGPUPod
+      expression: >
+        variables.gpuContainers.exists(c,
+          (has(c.resources.limits) && has(c.resources.limits["nvidia.com/gpu"]) && int(c.resources.limits["nvidia.com/gpu"]) >= 2) ||
+          (has(c.resources.requests) && has(c.resources.requests["nvidia.com/gpu"]) && int(c.resources.requests["nvidia.com/gpu"]) >= 2)
+        )
+    # Check if there is an emptyDir volume with medium: Memory configured
+    - name: hasShmMemoryVolume
+      expression: >
+        has(object.spec.volumes) &&
+        object.spec.volumes.exists(v,
+          has(v.emptyDir) &&
+          has(v.emptyDir.medium) &&
+          v.emptyDir.medium == "Memory"
+        )
+  validations:
+    # 1. Reject GPU pods in non-system namespaces that set securityContext.privileged == true
+    - expression: >
+        !variables.isGPUPod ||
+        variables.gpuContainers.all(c,
+          !has(c.securityContext) ||
+          !has(c.securityContext.privileged) ||
+          c.securityContext.privileged == false
+        )
+      message: "Security Policy Violation: Privileged containers are forbidden on GPU pods requesting nvidia.com/gpu. Privileged mode exposes all host /dev/nvidia* devices, bypassing Kubelet isolation and allowing cross-tenant VRAM access."
+      reason: Forbidden
+
+    # 2. Require spec.runtimeClassName == "nvidia" on pods requesting nvidia.com/gpu
+    - expression: >
+        !variables.isGPUPod || (
+          has(object.spec.runtimeClassName) &&
+          object.spec.runtimeClassName == "nvidia"
+        )
+      message: "Orchestration Policy Violation: GPU workloads requesting nvidia.com/gpu must explicitly specify 'spec.runtimeClassName: nvidia' to enable CDI and container runtime hooks."
+      reason: Invalid
+
+    # 3. Require a memory-backed emptyDir mounted at /dev/shm on multi-GPU pods (nvidia.com/gpu >= 2)
+    - expression: >
+        !variables.isMultiGPUPod || variables.hasShmMemoryVolume
+      message: "Reliability Policy Violation: Multi-GPU pods (nvidia.com/gpu >= 2) require an emptyDir volume with medium: Memory mounted to /dev/shm. Default 64MiB shm triggers fatal NCCL SIGBUS (Exit Code 135) crashes."
+      reason: Invalid
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gpu-inference-security-guardrails-binding
+spec:
+  policyName: gpu-inference-security-guardrails
+  validationActions: [Deny]
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        # Enforce on all tenant/inference namespaces, exempting system operators
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", "gpu-operator", "cert-manager", "monitoring"]

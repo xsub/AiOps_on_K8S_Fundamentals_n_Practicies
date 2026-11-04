@@ -1,0 +1,71 @@
+# High-Throughput Model Storage & Distributed Caching Architecture
+# Implements Section 6: Fluid Dataset + JindoRuntime for S3 Weight Acceleration & KServe OCI Modelcar
+apiVersion: data.fluid.io/v1alpha1
+kind: Dataset
+metadata:
+  name: llama-3-1-70b-weights
+  namespace: ai-inference
+spec:
+  mounts:
+    - mountPoint: "s3://prod-llm-models-us-east-1/Meta-Llama-3.1-70B-Instruct-FP8/"
+      name: llama-70b-s3
+      options:
+        fs.s3a.endpoint: "s3.us-east-1.amazonaws.com"
+      encryptOptions:
+        - name: fs.s3a.access.key
+          valueFrom:
+            secretKeyRef:
+              name: s3-model-creds
+              key: aws-access-key-id
+        - name: fs.s3a.secret.key
+          valueFrom:
+            secretKeyRef:
+              name: s3-model-creds
+              key: aws-secret-access-key
+  accessModes:
+    - ReadOnlyMany
+---
+apiVersion: data.fluid.io/v1alpha1
+kind: JindoRuntime
+metadata:
+  name: llama-3-1-70b-weights
+  namespace: ai-inference
+spec:
+  replicas: 4
+  tieredstore:
+    levels:
+      - mediumtype: MEM
+        path: /dev/shm
+        quota: 32Gi
+        high: "0.9"
+        low: "0.7"
+      - mediumtype: SSD
+        path: /mnt/nvme-raid0/fluid-cache
+        quota: 500Gi
+        high: "0.95"
+        low: "0.8"
+  worker:
+    nodeSelector:
+      node.kubernetes.io/instance-type: "p5.48xlarge"
+---
+# Alternative Pattern: KServe v0.14+ OCI Modelcar Volume Mount (Fast Layer Mount)
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: llama3-70b-modelcar-sample
+  namespace: ai-inference
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vLLM
+      storageUri: "oci://ghcr.io/my-org/models/llama-3.1-70b-instruct-fp8:v1.0"
+      resources:
+        limits:
+          cpu: "16"
+          memory: "128Gi"
+          nvidia.com/gpu: "4"
+        requests:
+          cpu: "16"
+          memory: "128Gi"
+          nvidia.com/gpu: "4"

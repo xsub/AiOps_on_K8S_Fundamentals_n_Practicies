@@ -1,0 +1,88 @@
+# Node Problem Detector (NPD) Custom Plugin ConfigMap & DaemonSet for NVIDIA GPU Hardware Faults
+# Monitors kernel kmsg for fatal hardware XIDs (48, 63, 64, 74, 79, 94, 95)
+# Sets permanent NodeCondition: GPUHardwareFault and fires K8s events for automated remediation
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-node-problem-detector-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: node-problem-detector
+    app.kubernetes.io/part-of: aiops-gpu-observability
+data:
+  gpu-xid-monitor.json: |
+    {
+      "plugin": "kmsg",
+      "logPath": "/dev/kmsg",
+      "lookback": "5m",
+      "bufferSize": 20,
+      "source": "gpu-hardware-monitor",
+      "conditions": [
+        {
+          "type": "GPUHardwareFault",
+          "reason": "GPUHardwareHealthy",
+          "message": "NVIDIA GPU silicon, NVLink interconnect, and HBM memory are operating normally."
+        }
+      ],
+      "rules": [
+        {
+          "type": "permanent",
+          "condition": "GPUHardwareFault",
+          "reason": "FatalNvidiaXidDetected",
+          "pattern": "NVRM: Xid .*: (48|63|64|74|79|94|95),"
+        },
+        {
+          "type": "temporary",
+          "reason": "FatalNvidiaXidEvent",
+          "pattern": "NVRM: Xid .*: (48|63|64|74|79|94|95),"
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gpu-node-problem-detector
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: gpu-node-problem-detector
+    app.kubernetes.io/part-of: aiops-gpu-observability
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gpu-node-problem-detector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gpu-node-problem-detector
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      serviceAccountName: node-problem-detector
+      containers:
+        - name: node-problem-detector
+          image: registry.k8s.io/node-problem-detector/node-problem-detector:v0.8.20
+          command:
+            - "/node-problem-detector"
+            - "--logtostderr"
+            - "--config.custom-plugin-monitor=/config/gpu-xid-monitor.json"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: kmsg
+              mountPath: /dev/kmsg
+              readOnly: true
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: kmsg
+          hostPath:
+            path: /dev/kmsg
+        - name: config
+          configMap:
+            name: gpu-node-problem-detector-config
