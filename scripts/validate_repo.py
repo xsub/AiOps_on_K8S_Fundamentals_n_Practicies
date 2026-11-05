@@ -27,7 +27,11 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     import yaml
 except ImportError:
-    yaml = None
+    sys.stderr.write(
+        "ERROR: PyYAML is required for strict Kubernetes AST validation.\n"
+        "Install with: pip install -r requirements-dev.txt\n"
+    )
+    sys.exit(1)
 
 # Supported Mermaid diagram headers
 SUPPORTED_MERMAID_HEADERS = (
