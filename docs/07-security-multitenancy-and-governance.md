@@ -80,7 +80,7 @@ spec:
 
   containers:
     - name: vllm-engine
-      image: vllm/vllm-openai:v0.6.3.post1
+      image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
       # 3. Restrict Container-level security context
       securityContext:
         allowPrivilegeEscalation: false
@@ -150,12 +150,12 @@ The table below contrasts the security and operational failure domains of the th
 
 | Architecture Dimension | Time-Slicing (Temporal Sharing) | CUDA MPS (Multi-Process Service) | MIG (Multi-Instance GPU - Hardware) |
 | :--- | :--- | :--- | :--- |
-| **Isolation Layer** | Software (CUDA Driver Context Scheduler) | Software (Shared MPS Server Daemon) | **Hardware Silicon (Physical HW Partitioning)** |
-| **Address Space Boundary** | Separate virtual address spaces, same physical memory crossbar | **Shared CUDA Context / Address Space** via MPS Server IPC | **Completely separate physical HBM memory controllers & crossbars** |
-| **Fault Isolation** | Moderate (driver crash affects all; process crash is isolated) | **ZERO FAULT ISOLATION**: If Client A triggers `XID 31` (MMU fault), **ALL co-tenants crash**! | **FULL HARDWARE ISOLATION**: Fault in Slice 0 (`XID 31/48`) has zero impact on Slice 1 |
-| **Memory Capacity Enforcement** | None (greedy pod triggers CUDA OOM for co-tenants) | Optional thread percentage; soft limits only | **Hardware enforced**: 10Gi, 20Gi, 40Gi physical boundaries |
+| **Isolation Layer** | Software (CUDA Driver Context Scheduler) | Software / Hardware Hybrid (Isolated Client VAS, Shared Execution Context) | **Hardware Silicon (Physical HW Partitioning)** |
+| **Address Space Boundary** | Separate virtual address spaces, same physical memory crossbar | **Isolated GPU virtual address spaces per client** (Volta+); shared hardware execution context | **Completely separate physical HBM memory controllers & crossbars** |
+| **Fault Isolation** | Moderate (driver crash affects all; process crash is isolated) | **ZERO HARDWARE FAULT ISOLATION**: Fatal exception (`XID 31/95`) resets shared context; **ALL co-tenants crash**! | **FULL HARDWARE ISOLATION**: Fault in Slice 0 (`XID 31/48`) has zero impact on Slice 1 |
+| **Memory Capacity Enforcement** | None (greedy pod triggers CUDA OOM for co-tenants) | Pinned device memory limit (`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`) | **Hardware enforced**: 10Gi, 20Gi, 40Gi physical boundaries |
 | **Microarchitectural Contention** | Shared L2 cache, SM schedulers, memory bus | Shared L2 cache, unified SM pipelines | **Dedicated SM clusters, dedicated L2 slices, isolated memory crossbars** |
-| **Security Suitability** | **INTERNAL TRUSTED TEAMS ONLY** | **INTERNAL HOMOGENEOUS PIPELINES ONLY** | **UNTRUSTED MULTI-TENANT ENTERPRISE SAAS** |
+| **Security Suitability** | **INTERNAL TRUSTED TEAMS ONLY** | **INTERNAL HOMOGENEOUS PIPELINES ONLY** | **MULTI-TENANT CLUSTERS** (Cryptographic attestation requires CC mode) |
 
 ```mermaid
 graph TD
@@ -166,15 +166,15 @@ graph TD
         note1["Warning: No VRAM cap!\nTenant A can consume 100% VRAM\ncausing Tenant B to crash."]
     end
 
-    subgraph MPS["CUDA MPS (Shared Context)"]
+    subgraph MPS["CUDA MPS (Isolated VAS, Shared Execution Context)"]
         MPS_Daemon["NVIDIA MPS Server Daemon"]
-        MPS_P1["Tenant A Client"] -->|POSIX IPC| MPS_Daemon
-        MPS_P2["Tenant B Client"] -->|POSIX IPC| MPS_Daemon
+        MPS_P1["Tenant A (Isolated VAS)"] -->|POSIX IPC| MPS_Daemon
+        MPS_P2["Tenant B (Isolated VAS)"] -->|POSIX IPC| MPS_Daemon
         MPS_Daemon --> MPS_GPU["Physical GPU Hardware"]
-        note2["Warning: Shared CUDA Context!\nXID 31 fatal exception in Tenant A\nkills Tenant B immediately."]
+        note2["Isolated Virtual Address Space\nWarning: Shared Hardware Context!\nFatal XID 31 exception in Tenant A\nresets context killing Tenant B."]
     end
 
-    subgraph MIG["Hardware MIG (True Multi-Tenancy)"]
+    subgraph MIG["Hardware MIG (Silicon-Enforced Multi-Tenancy)"]
         MIG_GPU["Physical H100 GPU (80GB)"]
         subgraph Slice1["MIG Instance 3g.40gb (Tenant A)"]
             SM1["Dedicated SMs (60)"]
@@ -188,7 +188,7 @@ graph TD
         end
         MIG_GPU --- Slice1
         MIG_GPU --- Slice2
-        note3["Full Hardware & Fault Boundary\nZero cross-talk, independent reset\nCryptographically safe multi-tenancy"]
+        note3["Silicon-Enforced Memory Crossbar & SM Isolation\nIndependent hardware fault containment\nEncrypted Memory Requires Confidential Computing (CC)"]
     end
 ```
 
@@ -409,13 +409,75 @@ The Pod "test-insecure-gpu" is invalid: : ValidatingAdmissionPolicy 'gpu-inferen
 
 ---
 
-## 7.5 Governance Verification Checklist
+## 7.5 Supply-Chain Hardening, Image Digest Pinning & NetworkPolicy Isolation
+
+Deploying foundation model inference engines exposes unique software supply-chain and network attack surfaces. Historical vulnerabilities in early serving versions illustrate the threat landscape:
+- **`GHSA-9pcc-gvx5-r5wm`**: Unauthenticated model downloading and weight execution vulnerability in vLLM versions prior to v0.6.4, permitting arbitrary code execution via malicious serialized tensor checkpoints.
+- **`CVE-2026-22773`**: Unauthenticated command execution and state corruption across distributed Ray and ZMQ IPC ports (`6379`), allowing lateral traversal between inference nodes.
+
+### Mandatory Supply-Chain Hardening Architecture
+To protect against supply-chain injection and lateral container escapes:
+
+1. **Immutable Image Digest Pinning**:
+   Never deploy floating tags like `:latest` or `:v0.33.0`. Enforce immutable sha256 digests in production pod specs:
+   ```yaml
+   image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
+   ```
+2. **API Authentication (`--api-key`)**:
+   Always launch the inference engine with explicit API key authentication:
+   ```bash
+   python3 -m vllm.entrypoints.openai.api_server \
+     --api-key "$VLLM_API_KEY" \
+     --model meta-llama/Meta-Llama-3.1-70B-Instruct-FP8
+   ```
+3. **East-West NetworkPolicy Isolation**:
+   Multi-node distributed serving uses Ray (`6379`) and NCCL socket rings. Apply strict Kubernetes `NetworkPolicy` to block cross-namespace access to internal orchestration ports:
+   ```yaml
+   apiVersion: networking.k8s.io/v1
+   kind: NetworkPolicy
+   metadata:
+     name: isolate-vllm-distributed-ports
+     namespace: ai-inference
+   spec:
+     podSelector:
+       matchLabels:
+         app.kubernetes.io/name: vllm-llama3-405b
+     policyTypes:
+       - Ingress
+     ingress:
+       - from:
+           - podSelector:
+               matchLabels:
+                 app.kubernetes.io/name: vllm-llama3-405b
+         ports:
+           - protocol: TCP
+             port: 6379     # Ray GCS
+           - protocol: TCP
+             port: 8000     # HTTP API
+   ```
+
+---
+
+## 7.6 Governance Verification Checklist
 
 Before certifying an inference namespace for production multi-tenant workloads:
 
 - [ ] **Admission Guardrails Active**: `ValidatingAdmissionPolicy` and its binding are active and denying non-compliant pods across all tenant namespaces.
 - [ ] **No Privileged Workloads**: `kubectl get pods -A -o jsonpath='{range .items[?(@.spec.containers[*].securityContext.privileged==true)]}{.metadata.namespace}{"/"}{.metadata.name}{"\n"}{end}'` returns zero pods in AI namespaces.
 - [ ] **Runtime Class Explicit**: All GPU workloads specify `runtimeClassName: nvidia`.
+- [ ] **Image Digests Pinned**: All model serving pods reference pinned `@sha256:...` digests scanned via Trivy or Clair.
 - [ ] **Secret Hardening**: Cloud IAM credentials use OIDC Workload Identity (AWS IRSA, GCP Workload Identity); no static credentials exist in container environment variables.
 - [ ] **Default Tokens Disabled**: `automountServiceAccountToken: false` is configured on all model-serving pod templates.
-- [ ] **MIG for Untrusted Multi-Tenancy**: Nodes hosting untrusted workloads run hardware MIG profiles with partitioned HBM and dedicated SM engines.
+- [ ] **MIG for Multi-Tenancy**: Nodes hosting multi-tenant workloads run hardware MIG profiles; hardware memory encryption utilizes NVIDIA Confidential Computing (CC) mode.
+
+---
+
+## References
+
+1. Kubernetes ValidatingAdmissionPolicy: <https://kubernetes.io/docs/reference/access-authn-authz/validating-admission-policy/>
+2. NVIDIA Confidential Computing on Hopper H100 Architecture: <https://www.nvidia.com/en-us/data-center/solutions/confidential-computing/>
+3. External Secrets Operator (ESO) Documentation: <https://external-secrets.io/latest/>
+4. vLLM Security Advisories & Vulnerability Notices: <https://github.com/vllm-project/vllm/security/advisories>
+5. Container Device Interface (CDI) Security Model: <https://github.com/container-orchestrated-devices/container-device-interface>
+6. Kubernetes Network Policies: <https://kubernetes.io/docs/concepts/services-networking/network-policies/>
+

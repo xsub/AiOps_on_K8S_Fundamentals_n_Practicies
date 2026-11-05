@@ -49,7 +49,12 @@ flowchart TD
 - **`/dev/shm` Allocation**: Multi-GPU tensor parallelism relies on POSIX shared memory for NCCL rings; exhaustion of `/dev/shm` crashes PyTorch with `SIGBUS`.
 
 ### Layer 2: GPU Silicon Hardware Telemetry (`DCGM Exporter`)
-NVIDIA Data Center GPU Manager (DCGM) collects silicon performance counters via Field IDs (100–1012), exported to Prometheus with rich Kubernetes metadata (`exported_pod`, `gpu`, `GPU_I_ID`):
+NVIDIA Data Center GPU Manager (DCGM) collects silicon performance counters via Field IDs (100–1012), exported to Prometheus with native Kubernetes metadata (`pod`, `namespace`, `container`, `Hostname`, `gpu`, `GPU_I_ID`):
+
+> [!IMPORTANT]
+> **Prometheus `honorLabels: true` Requirement**:  
+> By default, Prometheus overwrites target labels with its own scrape target labels. If `honorLabels: true` is omitted from the Prometheus Operator `ServiceMonitor`, Prometheus detects that `dcgm-exporter` is advertising `pod` and `namespace` labels and renames them to `exported_pod` and `exported_namespace`!  
+> In this architecture, `honorLabels: true` is enforced in the GPU Operator `ClusterPolicy` and Prometheus manifests, preserving native `pod` and `namespace` labels across all alerts, dashboards, and correlation queries.
 
 | DCGM Metric | Field ID | Unit | What It Measures | Day-2 Production Action |
 | :--- | :--- | :--- | :--- | :--- |
@@ -167,18 +172,25 @@ When NVIDIA kernel drivers encounter abnormal hardware or software states, they 
 
 ```mermaid
 flowchart TD
-    KernelLog["Kernel dmesg emits XID Fault\nNVRM: Xid (PCI:0000:81:00): ..."] --> NPD["Node Problem Detector (NPD)\nCustom Log Monitor (/dev/kmsg)"]
-    NPD --> Filter{Is XID Fatal Hardware?\n48, 64, 74, 79, 95, 120}
+    KernelLog["Kernel dmesg emits XID Fault\nNVRM: Xid (PCI:0000:81:00): ..."] --> NPD["Node Problem Detector (NPD)\n--config.system-log-monitor=/config/gpu-xid-monitor.json"]
+    NPD --> Filter{Is XID Fatal Hardware?\n48, 63, 64, 74, 79, 94, 95}
 
-    Filter -- "Yes (Hardware Failure)" --> SetCond["Set NodeCondition:\nGPUHardwareFailure = True"]
-    Filter -- "No (App Bug 13/31)" --> AlertOnly["Log Warning & Increment Metric\nLeave Node Schedulable"]
+    Filter -- "Yes (Hardware Failure)" --> SetCond["Set NodeCondition:\nGPUHardwareFault = True\n+ Emit K8s Warning Event"]
+    Filter -- "No (App Bug 13/31/43)" --> AlertOnly["Log Warning & Increment Metric\nLeave Node Schedulable"]
 
-    SetCond --> Draino["Automated Remediator / Draino"]
-    Draino --> Cordon["1. kubectl cordon node"]
-    Cordon --> Taint["2. kubectl taint node\nnvidia.com/gpu-xid-fault:NoSchedule"]
-    Taint --> Drain["3. Drain surviving pods to healthy nodes"]
+    SetCond --> Gate{"Downstream Remediator (aiops/remediator.py or Draino)\nPDB Check: pdb_disruptions_allowed > 0?"}
+    Gate -- "Blocked by PDB (disruptionsAllowed == 0)" --> Halt["Block Eviction to Prevent Quorum Collapse\nAlert On-Call SRE"]
+    Gate -- "Passed PDB Check (disruptionsAllowed >= 1)" --> Approval{"Approval Gate\nHuman SRE or Auto-Approved"}
+    Approval --> Cordon["1. kubectl cordon node"]
+    Cordon --> Taint["2. kubectl taint node\nnvidia.com/gpu-hardware-fault=true:NoSchedule"]
+    Taint --> Drain["3. Drain surviving pods honoring PDB"]
     Drain --> BMC["4. Trigger OOB IPMI Power Cycle / RMA Ticket"]
 ```
+
+> [!IMPORTANT]
+> **Node Problem Detector Architecture & Remediation Boundaries**:  
+> Node Problem Detector is purely a **detection and condition publishing daemon**. It operates with `--config.system-log-monitor` to parse `/dev/kmsg` and write `NodeCondition: GPUHardwareFault` and Kubernetes `Event`s into the API server.  
+> **NPD does NOT execute node cordoning, tainting, or draining directly!** Automated remediation must be executed by downstream remediation controllers (such as the repository's `aiops/remediator.py` engine or Draino/NHC). Downstream controllers must verify that `pdb_disruptions_allowed > 0` before initiating any pod evictions, preventing automated cascading outages across multi-node LLM serving groups.
 
 ### Deep Dive: Hardware Diagnostics & Remediation
 1. **XID 48 / 64 (Row Remapping Table Exhaustion)**:
@@ -193,7 +205,7 @@ flowchart TD
    ipmitool -H bmc-node04.dc -U admin -P secret chassis power reset
    ```
 
-See [`manifests/05-observability/gpu-node-problem-detector.yaml`](../manifests/05-observability/gpu-node-problem-detector.yaml) for automated detection and cordoning rules using Node Problem Detector.
+See [`manifests/05-observability/gpu-node-problem-detector.yaml`](../manifests/05-observability/gpu-node-problem-detector.yaml) for automated detection rules using Node Problem Detector.
 
 ---
 
@@ -270,7 +282,7 @@ See [`manifests/05-observability/prometheus-gpu-oom-alerts.yaml`](../manifests/0
 
 ```promql
 # 1. Real-Time Framebuffer VRAM Saturation (%)
-100 * DCGM_FI_DEV_FB_USED / (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE)
+100 * DCGM_FI_DEV_FB_USED / clamp_min(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE, 1)
 
 # 2. Decode Memory-Bandwidth Saturation (High DRAM Active, Low SM Compute Active)
 (DCGM_FI_PROF_DRAM_ACTIVE > 0.75) and (DCGM_FI_PROF_SM_ACTIVE < 0.30)
@@ -279,13 +291,31 @@ See [`manifests/05-observability/prometheus-gpu-oom-alerts.yaml`](../manifests/0
 rate(vllm:num_preemptions_total[5m]) > 0
 
 # 4. Underutilized "Zombie" GPU Allocation (< 15% VRAM and < 5% SM Active for > 4h)
-(avg_over_time(DCGM_FI_DEV_FB_USED[4h]) / (avg_over_time(DCGM_FI_DEV_FB_USED[4h]) + avg_over_time(DCGM_FI_DEV_FB_FREE[4h])) < 0.15)
+(avg_over_time(DCGM_FI_DEV_FB_USED[4h]) / clamp_min(avg_over_time(DCGM_FI_DEV_FB_USED[4h]) + avg_over_time(DCGM_FI_DEV_FB_FREE[4h]), 1) < 0.15)
   and (avg_over_time(DCGM_FI_PROF_SM_ACTIVE[4h]) < 0.05)
 
-# 5. Immediate Correlation: CUDA VRAM OOM Crash
+# 5. Immediate Correlation: CUDA VRAM OOM Crash (Native pod/namespace labels via honorLabels: true)
 (increase(kube_pod_container_status_restarts_total[5m]) > 0)
   and on(namespace, pod) (kube_pod_container_status_last_terminated_reason{reason="Error"} == 1)
-  and on(namespace, pod) (label_replace(max_over_time(DCGM_FI_DEV_FB_USED[5m]) / (max_over_time(DCGM_FI_DEV_FB_USED[5m]) + min_over_time(DCGM_FI_DEV_FB_FREE[5m])), "pod", "$1", "exported_pod", "(.*)") > 0.94)
+  and on(namespace, pod) (max by (namespace, pod) (max_over_time(DCGM_FI_DEV_FB_USED[5m]) / clamp_min(max_over_time(DCGM_FI_DEV_FB_USED[5m]) + min_over_time(DCGM_FI_DEV_FB_FREE[5m]), 1)) > 0.94)
+
+# 6. Critical Silicon Hardware Fault Alert (XID 48, 63, 64, 74, 79, 94, 95)
+(
+  DCGM_FI_DEV_XID_ERRORS == 48 or
+  DCGM_FI_DEV_XID_ERRORS == 63 or
+  DCGM_FI_DEV_XID_ERRORS == 64 or
+  DCGM_FI_DEV_XID_ERRORS == 74 or
+  DCGM_FI_DEV_XID_ERRORS == 79 or
+  DCGM_FI_DEV_XID_ERRORS == 94 or
+  DCGM_FI_DEV_XID_ERRORS == 95
+)
+
+# 7. Non-Fatal User-Space MMU / Application Driver Warning (XID 13, 31, 43 - DO NOT CORDON)
+(
+  DCGM_FI_DEV_XID_ERRORS == 13 or
+  DCGM_FI_DEV_XID_ERRORS == 31 or
+  DCGM_FI_DEV_XID_ERRORS == 43
+)
 ```
 
 ### Day-2 Command-Line Triage
@@ -298,10 +328,22 @@ kubectl get pods -A -o json | jq -r '
 '
 
 # 2. Inspect active Node Conditions set by Node Problem Detector
-kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU_FAIL:.status.conditions[?(@.type==\"GPUHardwareFailure\")].status,REASON:.status.conditions[?(@.type==\"GPUHardwareFailure\")].reason
+kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU_FAULT:.status.conditions[?(@.type==\"GPUHardwareFault\")].status,REASON:.status.conditions[?(@.type==\"GPUHardwareFault\")].reason
 
 # 3. Companion KubeVRAM CLI: Automatic 5-way crash correlation with remediation patch emission
 kubevram triage
 kubevram triage --pod vllm-llama3-70b-6f8d9b-c4x9z
 kubevram bridge xid
 ```
+
+---
+
+## References
+
+1. NVIDIA Data Center GPU Manager (DCGM) Architecture & User Guide: <https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/index.html>
+2. NVIDIA DCGM Exporter Configuration & Metric Field IDs: <https://github.com/NVIDIA/dcgm-exporter>
+3. NVIDIA Driver XID Error Codes Catalog: <https://docs.nvidia.com/deploy/xid-errors/index.html>
+4. Kubernetes Node Problem Detector: <https://github.com/kubernetes/node-problem-detector>
+5. Prometheus Operator ServiceMonitor & `honorLabels`: <https://prometheus-operator.dev/docs/operator/api/#monitoring.coreos.com/v1.Endpoint>
+6. OpenTelemetry Semantic Conventions for Generative AI Systems: <https://opentelemetry.io/docs/specs/semconv/gen-ai/>
+

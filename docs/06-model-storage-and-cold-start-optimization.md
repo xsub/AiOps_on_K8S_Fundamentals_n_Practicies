@@ -218,10 +218,16 @@ flowchart LR
 ## 6.6 Step-by-Step Optimization Playbook
 
 ### Step 1: Eliminate Image Pull Latency via Spegel (P2P Registry)
-Deploy **Spegel** as a Kubernetes DaemonSet. Spegel configures `containerd` to advertise local image layers via an internal libp2p network. When a new GPU worker node requires the `vllm/vllm-openai:v0.6.4` image ($16\text{ GB}$), it downloads layers from neighboring nodes across the local datacenter network at line rate ($100\text{ Gbps}$), completely avoiding external registry bandwidth bottlenecks.
+Deploy **Spegel** as a Kubernetes DaemonSet. Spegel configures `containerd` to advertise local image layers via an internal libp2p network. When a new GPU worker node requires the `vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e` image ($16\text{ GB}$), it downloads layers from neighboring nodes across the local datacenter network at line rate ($100\text{ Gbps}$), completely avoiding external registry bandwidth bottlenecks.
 
 ### Step 2: Stream Weights Directly to VRAM via GPUDirect Storage (GDS)
-Configure the NVIDIA GPU OperatorClusterPolicy with GDS enabled:
+
+> [!WARNING]
+> **Precompiled Driver Incompatibility with GPUDirect Storage**:  
+> As detailed in Chapter 01, precompiled driver containers (`driver.usePrecompiled: true`) **do NOT support GPUDirect Storage (`nvidia-fs`)**. Precompiled images lack kernel development headers and do not include the `nvidia-fs.ko` module.  
+> If GPUDirect Storage is required, you **must** configure DKMS compilation in the GPU Operator (`driver.usePrecompiled: false` with `gds.enabled: true`) or install drivers and `nvidia-fs` directly on the host OS!
+
+Configure the NVIDIA GPU Operator `ClusterPolicy` with DKMS-compiled GDS:
 ```yaml
 apiVersion: nvidia.com/v1
 kind: ClusterPolicy
@@ -232,6 +238,8 @@ spec:
     enabled: true
   driver:
     enabled: true
+    usePrecompiled: false       # Mandatory: DKMS builds nvidia.ko AND nvidia-fs.ko for GDS
+    version: "570"
 ```
 GDS utilizes the `cufile` library to establish a direct DMA pathway between NVMe-oF block storage and GPU High Bandwidth Memory. By eliminating CPU buffer copies, a $70\text{ GB}$ model transfers at the maximum physical bandwidth of the PCIe Gen5 bus ($64\text{ GB/s}$), loading in less than $2.5\text{ seconds}$.
 
@@ -303,3 +311,15 @@ kubectl get jindoruntimes.data.fluid.io -n ai-inference
 POD_UID=$(kubectl get pod vllm-llama3-70b-predictor-default-0 -n ai-inference -o jsonpath='{.metadata.uid}')
 cat /sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod${POD_UID}.slice/memory.stat | grep -E "anon|file"
 ```
+
+---
+
+## References
+
+1. NVIDIA Magnum IO GPUDirect Storage (GDS) Overview: <https://docs.nvidia.com/gpudirect-storage/overview-guide/index.html>
+2. Hugging Face Safetensors Format: <https://github.com/huggingface/safetensors>
+3. Fluid: Kubernetes-Native Distributed Dataset Orchestrator: <https://github.com/fluid-cloudnative/fluid>
+4. Kubernetes KEP-4639: OCI Volume Source (Modelcars): <https://github.com/kubernetes/enhancements/tree/master/keps/sig-node/4639-oci-volume-source>
+5. Spegel: P2P Container Image Distribution for Kubernetes: <https://github.com/spegel-org/spegel>
+6. Linux Kernel Page Cache & Cgroups Accounting: <https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html#memory>
+

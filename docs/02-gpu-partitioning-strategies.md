@@ -103,6 +103,12 @@ MIG divides the physical GPU into two hierarchical layers:
 1. **GPU Instance (GI)**: Partitions the physical memory subsystem, including HBM3 memory controllers, crossbar paths, L2 cache banks, and fault isolation domains. A GI represents a hardware-isolated boundary.
 2. **Compute Instance (CI)**: Partitions Streaming Multiprocessors (SMs) within an existing GPU Instance. All CIs inside a single GI share that GI’s memory controller, L2 cache, and memory bandwidth.
 
+### MIG Silicon Security Boundary vs. Confidential Computing
+MIG provides silicon-enforced compute, L2 cache, memory controller, and fault isolation suitable for multi-tenant clusters:
+- An unrecoverable exception or memory corruption event in one MIG instance does not propagate to adjacent instances on the same physical GPU.
+- However, MIG alone is **NOT a cryptographic enclave**. It does not encrypt GPU memory buses or verify code attestation.
+- True cryptographic isolation with hardware-based memory encryption and remote attestation requires enabling **NVIDIA Confidential Computing (CC) mode** on Hopper H100/H200 and Blackwell GPUs, pairing MIG with trusted execution environments (TEEs) such as AMD SEV-SNP or Intel TDX.
+
 ```mermaid
 flowchart TD
     subgraph PhysicalGPU["Physical A100 / H100 (80GB HBM)"]
@@ -156,7 +162,7 @@ metadata:
 spec:
   containers:
     - name: vllm-worker
-      image: vllm/vllm-openai:v0.6.4
+      image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
       resources:
         limits:
           nvidia.com/mig-2g.20gb: "1"
@@ -233,10 +239,10 @@ Modern NVIDIA Device Plugins natively configure MPS resource caps per container:
 
 ### Blast-Radius Analysis & Security Boundaries
 
-Despite fine-grained memory limits, MPS suffers from a critical architectural limitation: **zero fault isolation**.
-- All MPS clients share the same underlying virtual address space and CUDA context.
-- If Container A triggers an unhandled CUDA hardware exception (such as an illegal memory access, kernel memory corruption, or out-of-bounds pointer dereference), the physical GPU resets the CUDA context.
-- **Result**: The MPS server crashes, terminating Container A **and all other co-located containers on that GPU simultaneously** (`CUDA error: an illegal memory access was encountered`).
+Despite fine-grained memory limits, MPS presents distinct architectural security and fault characteristics:
+- **Virtual Address Space vs. Compute Context**: Pre-Volta MPS shared a single GPU address space; starting with NVIDIA Volta (Compute Capability 7.0+) through Ampere, Hopper, and Blackwell, each MPS client process receives an **isolated GPU virtual address space**, while sharing the hardware compute scheduling context.
+- **Zero Hardware Fault Containment**: Because all client processes execute within a shared hardware compute scheduling context on the physical GPU, an uncontained fatal GPU exception (such as an illegal memory access `XID 31`, kernel MMU fault, or uncontained ECC error) forces the GPU to reset the hardware context.
+- **Result**: The MPS server terminates, crashing Container A **and all other co-located containers on that physical GPU simultaneously** (`CUDA error: an illegal memory access was encountered`).
 
 > [!CAUTION]
 > Deploy CUDA MPS **only within trusted, cooperative microservice pipelines** (such as an embedding model and a reranker managed by the same team). Never deploy MPS across untrusted multi-tenant workloads.
@@ -323,3 +329,14 @@ kubectl exec -n gpu-operator ds/nvidia-device-plugin-daemonset -- nvidia-smi mig
 kubevram partition --gpu H100-80GB --workload vllm --tenants multi --emit-configmap
 kubevram bridge mig
 ```
+
+---
+
+## References
+
+1. NVIDIA Multi-Instance GPU (MIG) User Guide: <https://docs.nvidia.com/datacenter/tesla/mig-user-guide/>
+2. NVIDIA Multi-Process Service (MPS) Overview & Architecture: <https://docs.nvidia.com/deploy/mps/index.html>
+3. NVIDIA Confidential Computing on Hopper H100 Architecture: <https://www.nvidia.com/en-us/data-center/solutions/confidential-computing/>
+4. NVIDIA Device Plugin GPU Sharing (Time-Slicing & MPS): <https://github.com/NVIDIA/k8s-device-plugin#shared-access-to-gpus>
+5. NVIDIA MIG-Parted Configuration & Dynamic Reconfiguration: <https://github.com/NVIDIA/mig-parted>
+

@@ -298,8 +298,19 @@ kubectl patch deployment <deployment-name> -n <namespace> --type='json' -p='[
 
 ### Telemetry Signatures
 ```promql
-# Critical Alert: Fatal NVIDIA Hardware XID Fault
-(DCGM_FI_DEV_XID_ERRORS == 79 or DCGM_FI_DEV_XID_ERRORS == 94 or DCGM_FI_DEV_XID_ERRORS == 95) > 0
+# Critical Alert: Fatal NVIDIA Hardware Silicon / ECC Fault (XID 48, 63, 64, 74, 79, 94, 95)
+(
+  DCGM_FI_DEV_XID_ERRORS == 48 or
+  DCGM_FI_DEV_XID_ERRORS == 63 or
+  DCGM_FI_DEV_XID_ERRORS == 64 or
+  DCGM_FI_DEV_XID_ERRORS == 74 or
+  DCGM_FI_DEV_XID_ERRORS == 79 or
+  DCGM_FI_DEV_XID_ERRORS == 94 or
+  DCGM_FI_DEV_XID_ERRORS == 95
+) > 0
+
+# Non-Fatal Warning: User-Space MMU / Application Exception (XID 13, 31, 43 — DO NOT CORDON)
+(DCGM_FI_DEV_XID_ERRORS == 13 or DCGM_FI_DEV_XID_ERRORS == 31 or DCGM_FI_DEV_XID_ERRORS == 43) > 0
 ```
 
 ### Diagnostic Commands
@@ -317,6 +328,7 @@ kubevram triage --xid
 ### Root Cause
 - **`XID 79` (GPU Fallen Off the Bus)**: The GPU stopped responding on the PCIe link due to physical hardware failure, PCIe riser power loss, extreme thermal throttling, or fatal firmware hang.
 - **`XID 94/95` (Uncontained ECC Error)**: Double-bit uncorrectable memory flip occurred in physical High Bandwidth Memory (HBM). Because data integrity cannot be guaranteed, the GPU immediately halts execution to prevent data corruption.
+- **`XID 48/64` (Row Remap Table Full)**: Hardware HBM row remapping table is exhausted. Permanent physical degradation.
 - **DANGER**: Simply restarting the pod will result in immediate re-crash or silent inference corruption. The physical node must be cordoned immediately.
 
 ### Immediate Mitigation (Incident Run)
@@ -325,19 +337,24 @@ kubevram triage --xid
    kubectl cordon <node-name>
    kubectl taint nodes <node-name> nvidia.com/gpu-hardware-fault=true:NoSchedule
    ```
-2. Evict healthy pods safely to other nodes in the cluster:
+2. **Verify PodDisruptionBudget before draining**:
+   ```bash
+   kubectl get pdb -A
+   ```
+   Ensure `disruptionsAllowed >= 1`. If `disruptionsAllowed == 0`, automated draining will fail or violate SLA quorum! In that case, scale out healthy replicas on another node before proceeding with eviction.
+3. Evict healthy pods safely to other nodes in the cluster once PDB allows:
    ```bash
    kubectl drain <node-name> --delete-emptydir-data --ignore-daemonsets --force
    ```
-3. Attempt PCIe link secondary bus reset (if supported) or initiate a warm reboot of the node:
+4. Attempt PCIe link secondary bus reset (if supported) or initiate an Out-of-Band (OOB) IPMI/BMC power reset:
    ```bash
-   # Privileged host command
-   systemctl reboot
+   ipmitool -H bmc-<node-name> -U admin -P secret chassis power reset
    ```
 
 ### Permanent Declarative Fix
 1. If ECC errors (`XID 95`) persist after reboot, inspect remapped row status via `nvidia-smi -q -d RETIRED_PAGES,REMAPPED_ROWS`. If remap pending rows fail, RMA the physical GPU card with the hardware vendor.
-2. Deploy the automated node problem detector (NPD) with custom system log monitor rules to cordon nodes automatically when `XID 79` or `XID 95` appear in dmesg.
+2. Deploy Node Problem Detector with `--config.system-log-monitor` (`gpu-node-problem-detector.yaml`) to set `NodeCondition: GPUHardwareFault = True`.
+3. Configure an automated remediation controller (such as `aiops/remediator.py` or Draino) to watch this condition and perform PDB-verified cordoning and graceful draining.
 
 ---
 
@@ -503,3 +520,14 @@ The host OS performed an unattended kernel security upgrade (e.g. from `6.5.0-35
 ### Permanent Declarative Fix
 1. **Disable unattended kernel upgrades on GPU worker nodes!** Pin the Linux kernel package via `apt-mark hold linux-image-generic linux-headers-generic`.
 2. Follow the rolling upgrade policy defined in [`manifests/01-hardware-orchestration/gpu-operator-clusterpolicy.yaml`](../manifests/01-hardware-orchestration/gpu-operator-clusterpolicy.yaml) with an explicit Driver Upgrade Controller cordon/drain workflow.
+
+---
+
+## References
+
+1. NVIDIA Driver XID Errors Catalog & Root Cause Matrix: <https://docs.nvidia.com/deploy/xid-errors/index.html>
+2. Kubernetes Pod Disruption Budgets (PDB): <https://kubernetes.io/docs/concepts/workloads/pods/disruptions/>
+3. Kubernetes Node Problem Detector Architecture: <https://github.com/kubernetes/node-problem-detector>
+4. Draino: Automated Kubernetes Node Draining Controller: <https://github.com/planetlabs/draino>
+5. NVIDIA Data Center GPU Manager Diagnostics Reference: <https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/feature-overview.html#diagnostics>
+

@@ -16,19 +16,46 @@ Production Kubernetes AI platforms cleanly decouple **GPU Kernel & Memory Execut
 
 ```mermaid
 flowchart LR
-    Client["AI App / Agent Fleet"] --> GW["Istio / Envoy AI Gateway\nToken Rate Limit & Prefix-Aware Routing"]
-    GW -- "90% Baseline Traffic" --> Rev1["KServe Predictor v1\nvLLM Llama-3.1-70B BF16 (TP=4)"]
-    GW -- "10% Canary Traffic" --> Rev2["KServe Predictor v2\nvLLM Llama-3.1-70B FP8 (TP=2)"]
+    Client["AI App / Agent Fleet"] --> GW["Envoy AI Gateway / Gateway API HTTPRoute\nToken Rate Limit & Prefix-Aware Routing"]
+    GW -- "90% Baseline Traffic" --> Rev1["KServe Predictor v1 (Baseline)\nvLLM Llama-3.1-70B FP8 (TP=2)"]
+    GW -- "10% Canary Traffic" --> Rev2["KServe Predictor v2 (Canary)\nvLLM Llama-3.1-70B FP8 (TP=2, Speculative)"]
 
-    subgraph Pod["Inside Each vLLM GPU Pod"]
+    subgraph Pod["Inside Each vLLM GPU Pod (2x H100 80GB)"]
         Sched["Continuous Batching Scheduler\nChunked Prefill + Prefix Cache"]
         PA["PagedAttention Block Manager"]
-        HBM["GPU HBM3 VRAM:\n1. Static Model Weights\n2. CUDA Graph Workspace\n3. Paged KV-Cache Blocks"]
+        HBM["GPU HBM3 VRAM:\n1. Static Model Weights (TP=2)\n2. CUDA Graph Workspace\n3. Paged KV-Cache Blocks"]
         Sched --> PA --> HBM
     end
 
     Rev2 --> Sched
-    KEDA["KEDA Autoscaler\nScrapes vllm:num_requests_waiting\n& vllm:gpu_cache_usage_perc"] -. "Scales Replicas (min >= 2)" .-> Rev2
+    KEDA["KServe Native KEDA Autoscaler\nScrapes vllm:num_requests_waiting\n& vllm:gpu_cache_usage_perc"] -. "Scales Replicas (min >= 2)" .-> Rev2
+```
+
+### Gateway API `HTTPRoute` Weighted Canary Splitting
+Modern Kubernetes AI platforms use standard **Kubernetes Gateway API (`gateway.networking.k8s.io/v1`)** to execute weighted canary rollouts between model versions without Knative overhead:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: llama-3-1-70b-canary-route
+  namespace: ai-inference
+spec:
+  parentRefs:
+    - name: ai-gateway
+      namespace: envoy-gateway-system
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1/chat/completions
+      backendRefs:
+        - name: llama-3-1-70b-instruct-predictor-baseline
+          port: 8000
+          weight: 90
+        - name: llama-3-1-70b-instruct-predictor-canary
+          port: 8000
+          weight: 10
 ```
 
 ---
@@ -102,20 +129,26 @@ This represents an **$\approx 85\%$ memory reduction** compared to an equivalent
 
 ### Step-by-Step Sizing & Production Failure Case Study
 
-Consider deploying **`Llama-3.1-70B-FP8`** on a single **`1x H100-80GB`** GPU:
+#### The 1x GPU Anti-Pattern: Deterministic OutOfMemory
+Consider attempting to deploy **`Llama-3.1-70B-FP8`** on a single **`1x H100-80GB`** GPU:
 1. Physical VRAM: $80.0\text{ GiB}$.
-2. Allocated at `--gpu-memory-utilization=0.92`: $80 \times 0.92 = 73.60\text{ GiB}$.
+2. Usable VRAM at `--gpu-memory-utilization=0.92`: $80 \times 0.92 = 73.60\text{ GiB}$.
 3. Static FP8 weights: $70 \times 10^9 \times 1\text{ byte} \times 1.04 \approx 73.42\text{ GiB}$.
-4. CUDA runtime overhead + NCCL + PyTorch scratchpad: $\approx 2.80\text{ GiB}$.
-5. Total mandatory overhead: $73.42 + 2.80 = 76.22\text{ GiB} > 73.60\text{ GiB}$ usable VRAM.
+4. CUDA runtime overhead + NCCL scratchpad: $\approx 2.80\text{ GiB}$.
+5. Mandatory overhead: $73.42 + 2.80 = 76.22\text{ GiB} > 73.60\text{ GiB}$ usable VRAM.
 
-**Outcome**: vLLM immediately terminates on boot with `ValueError: No available memory for the cache blocks`.  
-Even if weights are heavily trimmed to fit, leaving the default `--max-model-len=131072` with BF16 KV cache demands $131072 \times 320\text{ KiB} \approx 40.0\text{ GiB}$ for just a single concurrent stream!  
-**Remediation**:
-- Shard model weights across multiple GPUs: `--tensor-parallel-size=2` ($36.7\text{ GiB}$ weights/GPU) or `--tensor-parallel-size=4` ($18.35\text{ GiB}$ weights/GPU).
-- Enforce explicit context ceilings: `--max-model-len=16384`.
-- Compress KV cache: `--kv-cache-dtype=fp8` (halves per-token KV bytes to $160\text{ KiB/token}$).
-- On 4 GPUs at `TP=4`, available KV cache per GPU is $\approx 50.5\text{ GiB}$, accommodating over $323,000$ active tokens or $\approx 20$ concurrent $16\text{k}$-token requests in flight.
+**Outcome**: vLLM crashes on startup with `ValueError: No available memory for the cache blocks`.
+
+#### The Production Standard: Sharded Serving with TP=2 (2x H100 80GB)
+In production, `Llama-3.1-70B-FP8` is deployed across **2x H100 80GB GPUs** (`--tensor-parallel-size=2`), providing $160\text{ GiB}$ total physical VRAM:
+1. Usable VRAM per GPU ($0.92$ util): $73.60\text{ GiB}$ ($147.2\text{ GiB}$ across 2 GPUs).
+2. Sharded static FP8 weights per GPU: $73.42\text{ GiB} / 2 \approx 36.71\text{ GiB}$.
+3. CUDA runtime + NCCL inter-GPU buffers: $\approx 3.20\text{ GiB}$ per GPU.
+4. **Remaining KV-Cache Pool per GPU**:
+   $$\text{VRAM}_{\text{KV}} = 73.60 - 36.71 - 3.20 = 33.69\text{ GiB per GPU} \quad (67.38\text{ GiB total KV pool})$$
+5. With `--kv-cache-dtype=fp8` ($160\text{ KiB/token}$ under GQA), total active token capacity across the replica is:
+   $$\text{Tokens}_{\text{max}} = \frac{67.38 \times 10^6\text{ KiB}}{160\text{ KiB/token}} \approx 421,000\text{ tokens}$$
+   This safely accommodates **$26$ concurrent requests** at `--max-model-len=16384` without KV-cache preemptions.
 
 ---
 
@@ -236,8 +269,39 @@ flowchart TD
     end
 ```
 
-### KEDA Production Trigger Configuration
-See [`manifests/04-inference-serving/keda-vllm-autoscaler.yaml`](../manifests/04-inference-serving/keda-vllm-autoscaler.yaml) for the full declarative specification.
+### KServe Native Autoscaling vs. Standalone KEDA ScaledObjects
+
+Production deployments operate under one of two mutually exclusive patterns:
+
+#### Pattern A: KServe RawDeployment Native KEDA Integration (Recommended)
+When running under KServe in `RawDeployment` mode (see [`kserve-vllm-canary.yaml`](../manifests/04-inference-serving/kserve-vllm-canary.yaml)), configure autoscaling declaratively directly on the `InferenceService`:
+
+```yaml
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: llama3-1-70b-instruct
+  namespace: ai-inference
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/autoscalerClass: "keda"
+spec:
+  predictor:
+    minReplicas: 2          # HA baseline; eliminates 120s cold start
+    maxReplicas: 8
+    scaleMetric: vllm:num_requests_waiting
+    scaleTarget: 4
+```
+
+KServe automatically provisions and manages the underlying KEDA `ScaledObject` and HPA resources internally.
+
+> [!CAUTION]
+> **NEVER Attach an External Manual `ScaledObject` to a KServe Predictor Deployment!**  
+> If an operator manually applies an external `ScaledObject` targeting `Deployment/llama3-1-70b-instruct-predictor-default` while KServe is also managing the service, **two independent reconciliation loops compete to write `spec.replicas`**.  
+> The resulting dual-controller race condition causes severe replica thrashing, continuous pod termination, and cascading 2-to-5 minute cold starts. Only use manual `ScaledObject` resources when deploying raw Kubernetes Deployments without KServe!
+
+#### Pattern B: Standalone KEDA ScaledObject (Vanilla Deployments)
+For teams operating vanilla Kubernetes Deployments without KServe, deploy a standalone `ScaledObject` (see [`keda-vllm-autoscaler.yaml`](../manifests/04-inference-serving/keda-vllm-autoscaler.yaml)):
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -249,7 +313,7 @@ spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: llama3-1-70b-instruct-predictor-default
+    name: llama3-1-70b-instruct-standalone-predictor
   minReplicaCount: 2          # Prevents catastrophic cold-start latency penalties
   maxReplicaCount: 8
   pollingInterval: 5          # Rapid 5s evaluation cycle
@@ -314,3 +378,16 @@ kubectl exec -it deploy/llama3-1-70b-instruct-predictor-default -n ai-inference 
 # Validate exact VRAM allocation and generate production Kubernetes manifests
 kubevram tune-vllm --model llama-3.1-70b --gpu H100-80GB --num-gpus 4 --dtype fp8 --kv-dtype fp8 --target-context 16384 --concurrency 32 --emit-manifest
 ```
+
+---
+
+## References
+
+1. vLLM High-Throughput Serving & PagedAttention: <https://arxiv.org/abs/2309.06180>
+2. vLLM Engine Configuration & CLI Reference: <https://docs.vllm.ai/en/latest/models/engine_args.html>
+3. KServe RawDeployment Architecture: <https://kserve.github.io/website/master/modelserving/v1beta1/raw_deployment/>
+4. KEDA Prometheus Scaler Documentation: <https://keda.sh/docs/latest/scalers/prometheus/>
+5. Kubernetes Gateway API Specification (`HTTPRoute`): <https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.HTTPRoute>
+6. NVIDIA TensorRT-LLM Architecture: <https://github.com/NVIDIA/TensorRT-LLM>
+7. SGLang RadixAttention Framework: <https://github.com/sgl-project/sglang>
+

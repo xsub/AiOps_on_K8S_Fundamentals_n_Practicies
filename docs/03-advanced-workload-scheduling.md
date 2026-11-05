@@ -124,6 +124,74 @@ sequenceDiagram
     Leader->>W2: Re-establishes fresh NCCL AllReduce communicators
 ```
 
+#### Production Multi-Node Synchronization Barrier: Ray Worker Wait Loop
+When running multi-node serving with `vLLM` using Ray (`--distributed-executor-backend ray`), a critical race condition occurs: the leader pod boots Ray Head (`ray start --head --port=6379`) and immediately attempts to initialize the model. If `vllm serve` launches before worker nodes have completed network registration, vLLM crashes with `RuntimeError: Insufficient GPU resources in cluster`.
+
+In production LWS manifests (see [`leaderworkerset-multinode-vllm.yaml`](../manifests/03-scheduling/leaderworkerset-multinode-vllm.yaml)), the leader container executes an inline barrier waiting for all worker nodes to report healthy:
+
+```bash
+# Leader startup command: start head, wait for workers, then launch vLLM
+ray start --head --port=6379 --num-gpus=8 && \
+python3 -c '
+import os, time, sys, ray
+ray.init(address="auto")
+expected_nodes = int(os.environ.get("LWS_GROUP_SIZE", "2"))
+expected_gpus = expected_nodes * 8
+timeout = 300
+start = time.time()
+while time.time() - start < timeout:
+    nodes = [n for n in ray.nodes() if n.get("Alive", False)]
+    total_gpus = sum(n.get("Resources", {}).get("GPU", 0) for n in nodes)
+    print(f"Waiting for LWS cluster: {len(nodes)}/{expected_nodes} nodes, {total_gpus}/{expected_gpus} GPUs alive...", flush=True)
+    if len(nodes) >= expected_nodes and total_gpus >= expected_gpus:
+        print("LWS barrier reached. Ray cluster fully initialized.", flush=True)
+        sys.exit(0)
+    time.sleep(2)
+print("Timeout waiting for Ray worker nodes to join", file=sys.stderr)
+sys.exit(1)
+' && \
+python3 -m vllm.entrypoints.openai.api_server \
+  --model meta-llama/Meta-Llama-3.1-405B-Instruct-FP8 \
+  --tensor-parallel-size 8 \
+  --pipeline-parallel-size 2 \
+  --distributed-executor-backend ray \
+  --gpu-memory-utilization 0.90
+```
+
+#### Volcano Gang Scheduling: Head & Worker Task Specs with Headless Service
+When using Volcano for atomic gang placement (see [`volcano-gang-distributed-vllm.yaml`](../manifests/03-scheduling/volcano-gang-distributed-vllm.yaml)), configure a `PodGroup` with explicit `minTaskMember` specifications and a governing headless `Service` (`clusterIP: None`) for stable inter-rank DNS:
+
+```yaml
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: PodGroup
+metadata:
+  name: llama3-405b-gang-group
+  namespace: ai-inference
+spec:
+  minMember: 2
+  minTaskMember:
+    head: 1
+    worker: 1
+  queue: llm-inference-prod
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-llama3-405b-headless
+  namespace: ai-inference
+spec:
+  clusterIP: None
+  selector:
+    app: vllm-llama3-405b
+  ports:
+    - name: http
+      port: 8000
+    - name: ray-gcs
+      port: 6379
+```
+
+The accompanying workload declares distinct task specs: `volcano.sh/task-spec: head` for the API server and `volcano.sh/task-spec: worker` for backend compute ranks. Volcano evaluates both tasks atomically, ensuring that neither pod binds unless all required GPUs across the gang group can be reserved simultaneously.
+
 ---
 
 ## 3.3 Intra-Node Hardware Topology & NUMA Alignment
@@ -299,3 +367,16 @@ kubevram topology --fabric
 kubevram bridge topo
 kubevram bridge shm
 ```
+
+---
+
+## References
+
+1. Kubernetes Kubelet Topology Manager: <https://kubernetes.io/docs/tasks/administer-cluster/topology-manager/>
+2. Kubernetes CPU Management Policies: <https://kubernetes.io/docs/tasks/administer-cluster/cpu-management-policies/>
+3. Kubernetes SIG-Apps LeaderWorkerSet (LWS) Architecture: <https://github.com/kubernetes-sigs/lws>
+4. Volcano Batch Scheduling & PodGroup Primitives: <https://volcano.sh/en/docs/>
+5. NVIDIA Collective Communications Library (NCCL) Developer Guide: <https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/index.html>
+6. GPUDirect RDMA with NVIDIA Peermem: <https://docs.nvidia.com/networking/display/edrmav10/gpudirect+rdma>
+7. vLLM Multi-Node Distributed Serving with Ray: <https://docs.vllm.ai/en/latest/serving/distributed_serving.html>
+

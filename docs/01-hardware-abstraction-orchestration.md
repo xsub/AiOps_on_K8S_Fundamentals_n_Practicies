@@ -151,9 +151,34 @@ During cluster autoscaling, the driver installation strategy represents the prim
 | **Failure Surface** | Requires prebuilt image matching exact kernel commit hash | Fails if public apt/yum repos are offline or kernel headers mismatch |
 | **Network & Air-Gap Suitability** | Excellent: self-contained image mirrored to private registry | High risk in air-gapped clusters due to external compiler dependencies |
 | **OS Patch Rollouts** | Host kernel updates require pushing updated driver image tags | Attempts automatic rebuild on reboot (prone to GCC version incompatibilities) |
+| **GPUDirect Storage (GDS) Support** | **UNSUPPORTED**: Precompiled images do NOT include `nvidia-fs` | **Supported**: Compiles `nvidia-fs.ko` alongside `nvidia.ko` (`gds.enabled: true`) |
+
+#### Driver Branch Specification Mechanics
+In the GPU Operator `ClusterPolicy`, when using `usePrecompiled: true`, configure the driver **branch** string rather than a point release:
+
+```yaml
+spec:
+  driver:
+    enabled: true
+    usePrecompiled: true
+    repository: nvcr.io/nvidia
+    image: driver
+    version: "570"   # Driver branch string (e.g., branch 570, NOT a static 550.90.07 tag)
+```
+
+The GPU Operator automatically queries the host node's kernel release and OS distribution to construct the complete image tag:
+$$\text{Image Tag} = \langle\text{branch}\rangle-\langle\text{kernel-version}\rangle-\langle\text{distro}\rangle$$
+For example, on Ubuntu 22.04 with kernel `5.15.0-1070-aws`, the operator pulls:
+`nvcr.io/nvidia/driver:570-5.15.0-1070-aws-ubuntu22.04`
+
+> [!WARNING]
+> **GPUDirect Storage (GDS / `nvidia-fs`) Incompatibility**:  
+> NVIDIA precompiled driver containers **do NOT package GPUDirect Storage (`nvidia-fs.ko`)**. If GPUDirect Storage is required (e.g., for NVMe-to-VRAM model weight streaming in Chapter 06), you **must** either:
+> 1. Set `driver.usePrecompiled: false` and `gds.enabled: true` to compile `nvidia.ko` and `nvidia-fs.ko` via DKMS in the driver container, or
+> 2. Install the NVIDIA driver, MOFED, and `nvidia-fs` directly on the host OS golden image and configure `driver.enabled: false`.
 
 > [!IMPORTANT]
-> Always set `driver.usePrecompiled: true` in production environments. Pair this with locked host kernel packages (`apt-mark hold linux-image-generic` or immutable OS distros like Flatcar / Talos) to ensure deterministic node bootstrap times.
+> When using `driver.usePrecompiled: true` in production, lock host kernel packages (`apt-mark hold linux-image-generic` or immutable OS distros like Flatcar / Talos) to ensure that unattended host OS upgrades do not break precompiled image resolution.
 
 ---
 
@@ -197,7 +222,7 @@ metadata:
     nvidia.com/gpu.memory: "81920"
     nvidia.com/gpu.sharing-strategy: "none"
     nvidia.com/mig.strategy: "mixed"
-    nvidia.com/cuda.driver.major: "550"
+    nvidia.com/cuda.driver.major: "570"
 ```
 
 ---
@@ -295,7 +320,7 @@ spec:
   automountServiceAccountToken: false
   containers:
     - name: vllm-engine
-      image: vllm/vllm-openai:v0.6.4
+      image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
       securityContext:
         privileged: false
         allowPrivilegeEscalation: false
@@ -331,3 +356,17 @@ kubectl get pods -A -o json | jq -r '
 | `nvidia-smi -L` | `kubectl get nodes -o custom-columns=NODE:.metadata.name,MODEL:.metadata.labels.'nvidia\.com/gpu\.product',ALLOC_GPUS:.status.allocatable.'nvidia\.com/gpu'` | `kubevram topology` |
 | `dmesg \| grep -i NVRM` | `kubectl logs -n gpu-operator -l app=nvidia-operator-validator` | `kubevram rbac-audit` |
 | `cat /etc/cdi/nvidia.yaml` | `kubectl exec -n gpu-operator ds/nvidia-container-toolkit-daemonset -- cat /var/run/cdi/nvidia.yaml` | `kubevram bridge driver` |
+
+---
+
+## References
+
+1. Kubernetes Device Plugin Framework: <https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/>
+2. Kubernetes Dynamic Resource Allocation (DRA): <https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/>
+3. Container Device Interface (CDI) Specification: <https://github.com/container-orchestrated-devices/container-device-interface>
+4. NVIDIA GPU Operator Architecture & ClusterPolicy: <https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/architecture.html>
+5. NVIDIA GPU Operator Precompiled Drivers: <https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/install-gpu-operator.html#precompiled-drivers>
+6. Kubernetes SIGs Kueue Documentation: <https://kueue.sigs.k8s.io/docs/overview/>
+7. Run:ai Platform & KAI Scheduler Documentation: <https://docs.run.ai/>
+8. Linux VFIO & IOMMU Grouping: <https://www.kernel.org/doc/html/latest/driver-api/vfio.html>
+

@@ -2,68 +2,74 @@
 
 ## Introduction
 
-This handbook is a production engineering reference for designing, scheduling, serving, securing, and troubleshooting **AI inference workloads on Kubernetes at scale**.
+This handbook is a production engineering reference for designing, scheduling, serving, securing, observing, and remediating **AI inference workloads on Kubernetes at scale**.
 
 Operating GPU-accelerated AI inference on Kubernetes exposes a fundamental architectural gap: **Kubernetes was engineered around stateless, elastic, CPU/RAM-centric microservices**, whereas **LLM and deep-learning inference workloads are stateful in GPU High-Bandwidth Memory (VRAM), sensitive to intra-node NVLink/PCIe/NUMA topology, and governed by hardware failure domains invisible to Linux cgroups**.
 
+---
+
+## Strategic Architecture: GPU Platform Engineering vs. AIOps
+
+To build reliable AI infrastructure, engineering teams must recognize the clear boundary between two tightly coupled disciplines:
+
 ```mermaid
-flowchart TB
-    subgraph Ops["Day-2 Operations, Security & Governance"]
-        Sec["07. Security, Multi-Tenancy & CEL Guardrails"]
-        Bridge["08. Linux-to-K8s Sysadmin Bridge"]
-        Runbooks["09. Day-2 Incident Runbooks (INC-01..08)"]
-        Checklist["10. Production Readiness & FinOps"]
+flowchart TD
+    subgraph GPUPlatform["Part I & II: GPU Platform Engineering & Kubernetes for AI (Chapters 01–08, 10)"]
+        H1["01. Hardware Abstraction (GPU Operator v25.3, Branch 570, DRA/CDI)"]
+        H2["02. Deterministic GPU Partitioning (MIG, CUDA MPS, Time-Slicing)"]
+        H3["03. Topology-Aware Scheduling (LeaderWorkerSet v0.6, Volcano v1.11, Kueue v0.11)"]
+        H4["04. Serving Plane & Runtime (vLLM v0.33.0, KServe v0.15 RawDeployment, KEDA v2.16)"]
+        H5["05. Three-Layer Telemetry (DCGM Exporter, honorLabels, cAdvisor, Runtime SLOs)"]
+        H6["06. Storage Acceleration (safetensors mmap, OCI Modelcars, Fluid, GPUDirect Storage)"]
+        H7["07. Zero-Trust Security (CEL Admission Guardrails, Pinned Digests, Workload Identity)"]
+        H8["08. Linux/CUDA Sysadmin Translation Bridge"]
+        H10["10. Production Readiness Pre-Flight Audit & GPU FinOps Sizing"]
     end
 
-    subgraph L5["05. Observability & Telemetry"]
-        DCGM["DCGM Exporter (VRAM, SM/Tensor Active, Power, XID)"]
-        OOM["5-Way Triage (Exit 137 vs CUDA OOM vs Time-Slicing vs SHM vs XID)"]
+    subgraph AIOpsEngine["Part III: AIOps for GPU Infrastructure (Chapters 09, 11 & aiops/ Reference Engine)"]
+        A1["09. Day-2 SRE Incident Runbooks (INC-01..08)"]
+        A2["11. Closed-Loop Anomaly Detection, Event Correlation & PDB-Gated Remediation"]
+        A3["aiops/ Reference Engine (EWMA/Z-Score, Linear TTE, RCA Scorer, PDB Gate, Declarative Patch)"]
     end
 
-    subgraph L4["04 & 06. Inference Runtimes, Model Serving & Weight Storage"]
-        Serve["Serving Plane (KServe, Envoy AI Gateway, KEDA Token Scaling)"]
-        Engine["Inference Engines (vLLM, TensorRT-LLM, SGLang, Disaggregated P/D)"]
-        Store["Model Storage (OCI Modelcars, NVMe Cache, GPUDirect Storage)"]
-    end
-
-    subgraph L3["03. Advanced Workload Scheduling"]
-        Gang["Gang & Multi-Node Orchestration (Volcano, KubeRay, LeaderWorkerSet)"]
-        Topo["Hardware Topology & Fabric (NVSwitch, PCIe Trees, GPUDirect RDMA)"]
-    end
-
-    subgraph L2["02. GPU Partitioning & Virtualization"]
-        VM["Hypervisor Layer (VFIO Passthrough vs NVIDIA vGPU)"]
-        Slice["Container Layer (Hardware MIG, CUDA MPS, Time-Slicing)"]
-    end
-
-    subgraph L1["01. Hardware Abstraction & Orchestration"]
-        DRA["Device Plugin API, Dynamic Resource Allocation (DRA) & CDI"]
-        Op["NVIDIA GPU Operator (Precompiled Drivers, RuntimeClass: nvidia)"]
-        Quota["Hierarchical Fair-Share Quotas (Kueue & Run:ai / KAI)"]
-    end
-
-    Ops --> L5 --> L4 --> L3 --> L2 --> L1
+    GPUPlatform -->|"DCGM Telemetry, K8s Events, NPD kmsg"| AIOpsEngine
+    AIOpsEngine -.->|"PDB-Gated Declarative Patches (Cordon, Taint, Scale, SHM Injection)"| GPUPlatform
 ```
+
+1. **GPU Platform Engineering / Kubernetes for AI (Chapters 01–08, 10)**:
+   The declarative substrate and runtime data plane: driver containerization, hardware abstraction via Dynamic Resource Allocation (DRA) and Container Device Interface (CDI), memory-isolated Multi-Instance GPU (MIG) slicing, gang-scheduled distributed model serving (LeaderWorkerSet, Volcano), KServe RawDeployment integration with KEDA, DCGM hardware metrics with `honorLabels: true`, high-bandwidth weight distribution, and CEL security guardrails.
+2. **AIOps for GPU Infrastructure (Chapters 09, 11 & `aiops/` reference engine)**:
+   The closed-loop cognitive control plane: online statistical anomaly detection (streaming EWMA and rolling Z-score), predictive linear-regression VRAM Time-To-Exhaustion (TTE) modeling, multi-signal alert storm correlation across topological failure domains, probabilistic root-cause analysis (RCA), and human-approval-gated remediation strictly bound by `PodDisruptionBudget` (PDB) constraints to prevent automated cascading cluster outages.
 
 ---
 
-## Strategic Positioning: Why Cloud-Native AI Operations?
+## Reference Stack & Version Compatibility Matrix
 
-### 1. The Day-2 AI Infrastructure Gap
-Most AI engineering literature focuses on model training, prompt engineering, or application-level orchestration—leaving **Day-2 Kubernetes GPU & Inference Operations** underserved. In production, platform and SRE teams face recurring operational bottlenecks:
-- Multi-gigabyte `safetensors` weight loads triggering Linux cgroup `OOMKilled` (`Exit 137`) even while 80 GB GPUs sit idle.
-- Co-located `vLLM` pods crashing with `torch.cuda.OutOfMemoryError` (`Exit 1`) on Time-Sliced GPUs due to greedy KV-cache pre-allocation.
-- Multi-GPU Tensor Parallel (`TP >= 2`) deployments hanging or crashing with `SIGBUS` (`Exit 135`) on Kubernetes' default `64Mi` `/dev/shm` mount or cross-socket UPI links.
-- Silent throughput collapse from KV-cache preemption storms (`vllm:num_preemptions_total`) or unisolated hardware ECC faults (`XID 48, 79, 94, 95`).
+All architectural specifications, manifests, and runbooks in this repository are verified against the following production baseline:
 
-### 2. Bridging Linux/CUDA Mental Models to Kubernetes
-Existing Kubernetes tools (`k9s`, `k8sgpt`, `Popeye`) inspect generic Pod states and `metrics-server` CPU/RAM metrics without GPU hardware or inference-engine awareness. This handbook—together with its companion CLI tool [**KubeVRAM**](https://github.com/xsub/KubeVRAM)—bridges bare-metal Linux/CUDA operations directly to declarative Kubernetes control planes.
+| Technology Component | Certified Version | Architectural Role & Implementation Details |
+| :--- | :--- | :--- |
+| **Kubernetes Core** | `v1.32` | Base orchestration platform; native CEL `ValidatingAdmissionPolicy` and cgroup v2 systemd driver. |
+| **NVIDIA GPU Operator** | `v25.3` | Reconciles driver containers, container toolkit, DCGM exporter, GFD, and MIG manager via `ClusterPolicy`. |
+| **NVIDIA Data Center Driver** | **Branch `570`** | Driver branch (e.g. `570.86.16`). GPU Operator combines branch + kernel version + distro for precompiled images. |
+| **vLLM Engine** | `v0.33.0` | PagedAttention continuous batching runtime; pinned image digest: `vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e`. |
+| **KServe Serving Plane** | `v0.15` | Model serving control plane deployed in `RawDeployment` mode with Istio / Envoy Gateway API canary routing. |
+| **KEDA Autoscaler** | `v2.16` | Event-driven autoscaling controller natively driven via `serving.kserve.io/autoscalerClass: "keda"`. |
+| **LeaderWorkerSet (LWS)** | `v0.6` | Kubernetes SIG-Apps controller for multi-node LLM serving with coupled `RecreateGroupOnPodRestart` semantics. |
+| **Kubernetes SIGs Kueue** | `v0.11` | *Alternative Scheduler A*: Hierarchical fair-share quotas, cohort lending/borrowing, and admission preemption. |
+| **Volcano Batch Scheduler** | `v1.11` | *Alternative Scheduler B*: Gang-scheduling replacement scheduler with `PodGroup` and topology plugins. |
+| **Run:ai Scheduler (KAI)** | `v2.18+` | *Alternative Scheduler C*: Dynamic GPU fractional sharing and multi-tenant department queues. |
+| **Node Problem Detector** | `v1.36.1` | Kernel `kmsg` hardware monitor logging XID events and toggling `NodeCondition: GPUHardwareFault`. |
+
+> [!IMPORTANT]
+> **Mutual Exclusivity of Advanced Schedulers**:  
+> `Kueue`, `Volcano`, and `Run:ai (KAI)` represent **mutually exclusive scheduling architectures**. Never run them simultaneously on the same workloads! This repository provides separate Kustomize overlays (`deploy/overlays/lws-kueue/`, `deploy/overlays/volcano-gang/`) so platforms deploy exactly one scheduling engine tailored to their workload archetype.
 
 ---
 
 ## Complete Handbook Navigation Matrix
 
-| Chapter | Engineering Domain | Reference Manifests | Companion CLI |
+| Chapter | Engineering Domain | Reference Manifests & Code | Companion Tools |
 | :--- | :--- | :--- | :--- |
 | **[01](./01-hardware-abstraction-orchestration.md)** | **Hardware Abstraction, DRA/CDI, GPU Operator & Quotas** | [`01-hardware-orchestration/`](../manifests/01-hardware-orchestration/) | `kubevram topology` |
 | **[02](./02-gpu-partitioning-strategies.md)** | **GPU Partitioning: Hypervisor vGPU, MIG, MPS & Time-Slicing** | [`02-gpu-partitioning/`](../manifests/02-gpu-partitioning/) | `kubevram partition` |
@@ -75,31 +81,50 @@ Existing Kubernetes tools (`k9s`, `k8sgpt`, `Popeye`) inspect generic Pod states
 | **[08](./08-linux-to-k8s-sysadmin-bridge.md)** | **Linux/CUDA Sysadmin to Kubernetes & PromQL Translation** | [`05-observability/`](../manifests/05-observability/) | `kubevram bridge` |
 | **[09](./09-day2-incident-runbooks.md)** | **Day-2 SRE On-Call Incident Runbooks (`INC-01` – `INC-08`)** | [`05-observability/`](../manifests/05-observability/) | `kubevram triage` |
 | **[10](./10-production-readiness-checklist.md)** | **Production Readiness Checklist & GPU Capacity / FinOps Sizing** | [`manifests/`](../manifests/) | `kubevram overview` |
+| **[11](./11-aiops-closed-loop-architecture.md)** | **AIOps Closed-Loop Architecture, RCA & PDB-Gated Remediation** | [`aiops/`](../aiops/) (Reference Engine) | `python3 -m aiops evaluate` |
 
 ---
 
 ## Executive Summary of Core Architectural Principles
 
 ### 1. Hardware Abstraction & Quota Governance
-- **Decoupled Lifecycle**: Manage kernel modules (`nvidia.ko`, `nvidia-peermem.ko`), `nvidia-container-toolkit`, Device Plugin / DRA drivers, and DCGM Exporter declaratively via the **NVIDIA GPU Operator** using precompiled driver containers for fast node scale-out.
-- **Dynamic Resource Allocation (DRA) & CDI**: Transition from scalar integer `nvidia.com/gpu` counts toward **DRA (`resource.k8s.io/v1beta1`)** and **CDI** for topology-aware multi-GPU, MIG, and IMEX channel claims.
-- **Fair-Share Multi-Tenancy**: Replace static `ResourceQuota` islands with hierarchical fair-share schedulers (**Kueue** or **Run:ai / KAI Scheduler**) supporting guaranteed nominal quotas, idle cohort borrowing, and priority preemption.
+- **Decoupled Lifecycle**: Manage kernel modules (`nvidia.ko`, `nvidia-peermem.ko`), Container Toolkit, and DCGM Exporter declaratively via NVIDIA GPU Operator using driver branch `"570"`. For rapid autoscaling, use precompiled driver images (`usePrecompiled: true`).
+- **Dynamic Resource Allocation (DRA) & CDI**: Transition from scalar integer `nvidia.com/gpu` counts toward structured claims evaluated via CEL against `ResourceSlice` objects, mapped to `/dev/nvidia*` via Container Device Interface (CDI).
+- **Fair-Share Multi-Tenancy**: Deploy either Kueue or Run:ai KAI via dedicated overlays (`deploy/overlays/`) for dynamic borrowing, nominal quotas, and admission-level preemption.
 
 ### 2. Deterministic GPU Sharing
-- **Hardware MIG First for Multi-Tenant LLMs**: On Ampere (`A100`), Hopper (`H100`/`H200`), and Blackwell (`B200`), partition silicon via **MIG** (`1g.10gb`, `2g.20gb`, `3g.40gb`, `4g.40gb`) for dedicated HBM controllers, L2 cache banks, and fault isolation.
-- **CUDA MPS for Cooperative Non-MIG Pipelines**: On PCIe inference GPUs lacking MIG (`L4`, `L40S`, `A10G`), use **CUDA MPS** with explicit `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` and `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` caps for trusted pipelines (e.g., RAG embedding + reranking).
-- **Guardrail Time-Slicing**: Restrict software Time-Slicing to bursty dev/CI workloads; never schedule default `vLLM` pods (`--gpu-memory-utilization=0.90`) onto time-sliced GPUs without explicit per-replica memory caps.
+- **Hardware MIG for Multi-Tenant LLMs**: On A100, H100, and Blackwell, partition silicon via MIG for dedicated HBM memory controllers, L2 cache banks, and fault isolation. MIG provides silicon boundary isolation, but hardware memory encryption requires NVIDIA Confidential Computing (CC) mode.
+- **CUDA MPS Address Space Isolation**: Starting with NVIDIA Volta through Ampere/Hopper/Blackwell, MPS provides **isolated GPU virtual address spaces** for each client process while sharing the hardware execution context. Unhandled kernel exceptions still reset the shared context (no hardware fault containment).
+- **Guardrail Time-Slicing**: Restrict software Time-Slicing to bursty dev/CI workloads; never schedule un-capped vLLM pods without explicit per-replica memory caps (`--gpu-memory-utilization <= 0.45`).
 
 ### 3. Topology- & Gang-Aware Distributed Placement
-- **Atomic Gang Placement**: Schedule multi-pod/multi-node inference via **LeaderWorkerSet (`LWS`)**, **Volcano (`PodGroup`)**, or **KubeRay** so partial pod placements never deadlock cluster GPUs.
-- **NUMA, NVSwitch & RDMA Alignment**: Enforce kubelet `topologyManagerPolicy: single-numa-node`, co-locate GPUs and RoCEv2/InfiniBand NICs on shared PCIe Gen5 switches (`PIX`/`NVL`), and provision memory-backed `/dev/shm` (`16Gi`–`64Gi`) for NCCL collectives.
+- **Atomic Gang Placement**: Schedule multi-pod/multi-node inference via **LeaderWorkerSet (`LWS`)** or **Volcano (`PodGroup`)**. Ensure LWS startup routines wait for all Ray worker nodes to join before launching `vllm serve --distributed-executor-backend=ray`.
+- **Intra-Node & Network Fabric**: Enforce kubelet `topologyManagerPolicy: single-numa-node`, co-locate GPUs and RDMA HCAs on shared PCIe Gen5 switches, and provision memory-backed `/dev/shm` (`16Gi`–`64Gi`) to prevent NCCL `SIGBUS` (`Exit 135`).
 
 ### 4. Inference Engine Budgeting, Disaggregation & Storage
-- **Explicit KV-Cache Math**: Budget total VRAM across weights, CUDA context/graphs, activations, and GQA/MLA KV cache:
+- **Explicit KV-Cache Math**: Budget total VRAM across weights, CUDA graphs, activations, and KV cache:
   $$\text{Bytes}_{\text{KV/token}} = 2 \times L \times n_{\text{kv\_heads}} \times d_{\text{head}} \times \text{Bytes}_{\text{kv\_dtype}}$$
-- **Cold-Start & `mmap` Mitigation**: Disable `scale-to-zero` on latency-critical LLMs, serve weights from NVMe RWX caches / OCI Modelcars / GPUDirect Storage, and account for `safetensors` `mmap()` page-cache pressure inside container `resources.limits.memory`.
-- **Queue- & KV-Aware Autoscaling**: Scale replicas via **KEDA** on `vllm:num_requests_waiting` and `vllm:gpu_cache_usage_perc` with long scale-down stabilization windows (`>= 600s`).
+- **Cold-Start & `mmap` Mitigation**: Disable `scale-to-zero` on production LLMs (`minReplicas >= 2`). Size host memory limits ($\ge 1.5\times$ weights) to survive safetensors `mmap()` page-cache pressure. Note that precompiled drivers do NOT support GPUDirect Storage; DKMS driver containers or host-installed drivers are required for GDS.
+- **Native KServe Autoscaling**: In KServe `RawDeployment`, leverage native `serving.kserve.io/autoscalerClass: "keda"` integration rather than attaching unmanaged external `ScaledObject` resources.
 
-### 5. Hardware Telemetry, Security & SRE Runbooks
-- **Three-Layer Observability**: Correlate cgroup metrics (`cAdvisor`), silicon profiling (`DCGM_FI_DEV_FB_USED`, `DCGM_FI_PROF_SM_ACTIVE`, `DCGM_FI_PROF_DRAM_ACTIVE`, `DCGM_FI_DEV_XID_ERRORS`), and runtime SLOs (`TTFT`, `TPOT`, `vllm:num_preemptions_total`).
-- **Zero-Privilege Runtime Security**: Enforce `runtimeClassName: nvidia` and block `securityContext.privileged: true` via native Kubernetes **CEL `ValidatingAdmissionPolicy`**, preventing cross-tenant `/dev/nvidia*` device exposure.
+### 5. AIOps Closed-Loop Control & SRE Runbooks
+- **Three-Layer Observability**: Configure Prometheus `ServiceMonitor` with `honorLabels: true` to prevent renaming native `pod` and `namespace` labels to `exported_pod`.
+- **NPD vs. Remediation**: Node Problem Detector uses `--config.system-log-monitor` to monitor `/dev/kmsg` and **only** updates `NodeCondition` and `Event`s; downstream controllers (such as `aiops/remediator.py` or Draino) execute `cordon`/`taint`/`drain` subject to strict `PodDisruptionBudget` checks.
+- **Separation of Hardware vs. Software XIDs**: Distinguish unrecoverable silicon hardware XIDs (`48, 63, 64, 74, 79, 94, 95`) from non-fatal user-space MMU and CUDA kernel exceptions (`13, 31, 43`).
+
+---
+
+## References
+
+1. Kubernetes Dynamic Resource Allocation (DRA): <https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/>
+2. Container Device Interface (CDI) Specification: <https://github.com/container-orchestrated-devices/container-device-interface>
+3. NVIDIA GPU Operator Documentation: <https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/>
+4. NVIDIA Multi-Instance GPU (MIG) User Guide: <https://docs.nvidia.com/datacenter/tesla/mig-user-guide/>
+5. NVIDIA Multi-Process Service (MPS) Architecture: <https://docs.nvidia.com/deploy/mps/index.html>
+6. Kubernetes SIG-Apps LeaderWorkerSet (LWS): <https://github.com/kubernetes-sigs/lws>
+7. Kubernetes SIGs Kueue: <https://kueue.sigs.k8s.io/>
+8. Volcano Batch Scheduling: <https://volcano.sh/en/docs/>
+9. KServe InferenceService & RawDeployment: <https://kserve.github.io/website/master/modelserving/v1beta1/raw_deployment/>
+10. KEDA Kubernetes Event-driven Autoscaling: <https://keda.sh/docs/latest/>
+11. vLLM Distributed Serving Documentation: <https://docs.vllm.ai/en/latest/serving/distributed_serving.html>
+12. NVIDIA DCGM Exporter & Prometheus Metrics: <https://github.com/NVIDIA/dcgm-exporter>

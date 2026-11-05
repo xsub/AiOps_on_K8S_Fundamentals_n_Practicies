@@ -47,7 +47,7 @@ In bare-metal Linux, discovering GPUs involves inspecting PCIe root complexes vi
 | `lspci \| grep -i nvidia` | `kubectl get nodes -l feature.node.kubernetes.io/pci-10de.present=true` | `count(DCGM_FI_DEV_GPU_UTIL) by (Hostname)` | Bare-metal admins verify physical PCIe enumeration (`0000:81:00.0`). In K8s, pods do not see PCIe bus IDs unless granted raw sysfs mounts. Target nodes via NFD vendor labels (`0x10de` = NVIDIA). |
 | `nvidia-smi -L` (List GPUs & UUIDs) | `kubectl get nodes -o custom-columns=NAME:.metadata.name,GPUS:.status.allocatable.'nvidia\.com/gpu'` | `count by (modelName, Hostname) (DCGM_FI_DEV_BRAND)` | `nvidia-smi -L` outputs global host indices (`GPU 0`, `GPU 1`). In K8s, GPU indices are localized per container: a pod requesting 1 GPU always sees its allocated device as `GPU 0` inside the container regardless of physical slot! |
 | `nvidia-smi -q -d MEMORY` | `kubectl get node <node> -o jsonpath='{.metadata.labels.nvidia\.com/gpu\.memory}'` | `DCGM_FI_DEV_FB_TOTAL` | GFD labels memory in megabytes (e.g., `81920` for H100). Do not use `kubectl describe node` for real-time memory usage—K8s tracks GPU capacity as integer units, not bytes. |
-| `ls -la /dev/nvidia*` | `kubectl get pods <pod> -o jsonpath='{.spec.containers[*].resources.limits}'` | `DCGM_FI_DEV_GPU_UTIL{exported_pod="<pod>"}` | In bare metal, all `/dev/nvidia*` nodes are visible to all users. In K8s with CDI, only allocated devices are injected into the container's device cgroup. |
+| `ls -la /dev/nvidia*` | `kubectl get pods <pod> -o jsonpath='{.spec.containers[*].resources.limits}'` | `DCGM_FI_DEV_GPU_UTIL{pod="<pod>"}` | In bare metal, all `/dev/nvidia*` nodes are visible to all users. In K8s with CDI, only allocated devices are injected into the container's device cgroup. (Note: `honorLabels: true` preserves native `pod` label). |
 
 ### KubeVRAM Command Equivalent
 ```bash
@@ -85,7 +85,7 @@ The most dangerous pitfall for Linux sysadmins transitioning to Kubernetes is re
 | `nvidia-smi` (Current VRAM & Util) | **NO NATIVE K8S COMMAND!** (`kubectl top pod` only shows host CPU/RAM) | `DCGM_FI_DEV_FB_USED` and `DCGM_FI_DEV_FB_FREE` | **CRITICAL PITFALL**: `kubectl top pod` showing `4GiB / 64GiB` does NOT mean the GPU is healthy. The GPU VRAM could be 99.9% full inside the hardware framebuffer! Always check DCGM. |
 | `nvidia-smi dmon -s u` (SM Activity) | N/A | `DCGM_FI_PROF_SM_ACTIVE` | Bare-metal `GPU-Util %` is misleading for LLMs. An SM is marked "active" if even one thread executes. `DCGM_FI_PROF_SM_ACTIVE` measures the true fraction of cycles warps are active. |
 | `nvidia-smi dmon -s m` (Memory Bandwidth) | N/A | `DCGM_FI_PROF_DRAM_ACTIVE` | Measures HBM3/HBM3e read/write saturation. In LLM autoregressive token decode, memory bandwidth saturation (`DRAM_ACTIVE > 0.80`) is the true throughput bottleneck. |
-| `nvtop` / `gpustat` (Interactive Process Monitor) | `kubectl exec -it <pod> -- nvidia-smi` (if present) or `kubevram top` | `DCGM_FI_DEV_FB_USED{exported_pod=~".+"}` | Containers rarely bundle interactive tools like `nvtop`. Use Prometheus dashboards or `kubevram top` to aggregate live pod-level VRAM telemetry. |
+| `nvtop` / `gpustat` (Interactive Process Monitor) | `kubectl exec -it <pod> -- nvidia-smi` (if present) or `kubevram top` | `DCGM_FI_DEV_FB_USED{pod=~".+"}` | Containers rarely bundle interactive tools like `nvtop`. Use Prometheus dashboards with `honorLabels: true` or `kubevram top` to aggregate live pod-level VRAM telemetry. |
 
 ```mermaid
 flowchart TD
@@ -171,9 +171,9 @@ When a bare-metal job fails, engineers inspect `/var/log/messages`, run `dmesg -
 
 | Bare-Metal Linux / CUDA Command | Kubernetes API / `kubectl` Equivalent | DCGM / Prometheus PromQL Equivalent | Architectural Difference & Pitfall |
 | :--- | :--- | :--- | :--- |
-| `dmesg -T \| grep -E "NVRM: Xid"` | `kubectl get events --field-selector reason=Failed` and DCGM metric alerts | `DCGM_FI_DEV_XID_ERRORS` | Silicon hardware faults (e.g., XID 79, XID 95) emit kernel messages to the host kernel log. Pods do not receive kernel dmesg; platform teams must alert on `DCGM_FI_DEV_XID_ERRORS > 0`. |
+| `dmesg -T \| grep -E "NVRM: Xid"` | `kubectl get events --field-selector reason=Failed` and DCGM metric alerts | `DCGM_FI_DEV_XID_ERRORS` | Silicon hardware faults (e.g., XID 48/64/74/79/94/95) emit kernel messages to the host kernel log. Pods do not receive kernel dmesg; platform teams must alert on `DCGM_FI_DEV_XID_ERRORS` and distinguish hardware faults from user-space MMU bugs (XID 13/31). |
 | `cat /sys/fs/cgroup/memory.events` (`oom_kill`) | `kubectl describe pod <pod>` -> Look for `Last State: Terminated, Reason: OOMKilled, Exit Code: 137` | `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}` | **OOM DISAMBIGUATION**: Exit 137 indicates the **Linux cgroup killed the container due to host DRAM exhaustion** (`memory.max`). It does NOT mean the GPU ran out of VRAM! |
-| PyTorch `torch.cuda.OutOfMemoryError` in logs | `kubectl logs <pod> --previous` -> Check for `CUDA out of memory` with `Exit Code: 1` | `label_replace(DCGM_FI_DEV_FB_USED, "pod", "$1", "exported_pod", "(.*)") / ... > 0.95` | CUDA VRAM exhaustion terminates PyTorch with **Exit Code 1**, NOT 137. Do not increase K8s `limits.memory` to resolve a CUDA VRAM OOM! |
+| PyTorch `torch.cuda.OutOfMemoryError` in logs | `kubectl logs <pod> --previous` -> Check for `CUDA out of memory` with `Exit Code: 1` | `(max by (pod) (DCGM_FI_DEV_FB_USED) / clamp_min(DCGM_FI_DEV_FB_TOTAL, 1)) > 0.95` | CUDA VRAM exhaustion terminates PyTorch with **Exit Code 1**, NOT 137. Do not increase K8s `limits.memory` to resolve a CUDA VRAM OOM! Query native `pod` label (preserved via `honorLabels: true`). |
 | `dcgmi diag -r 3` (Comprehensive HW Diagnostic) | `kubectl run gpu-diag --image=nvidia/dcgm:latest --restart=Never -- dcgmi diag -r 3` | `DCGM_FI_DEV_DIAG_RESULT` | Bare-metal sysadmins run DCGM diagnostics directly. On K8s, run ephemeral diagnostic jobs or use the Operator Validator pod. |
 
 ### KubeVRAM Command Equivalent
@@ -208,4 +208,15 @@ On bare metal, administrators kill hung jobs via `kill -9 <PID>`, check file des
 | **Fix Shared Memory Crashes** | Edit `/etc/fstab` (mount `-o remount,size=64G /dev/shm`) | Add `emptyDir: { medium: Memory, sizeLimit: 16Gi }` to Pod Spec |
 | **Verify Driver Stack** | `lsmod \| grep nvidia && modinfo nvidia` | `kubectl get pods -n gpu-operator` |
 | **Select GPU Topology** | `export CUDA_VISIBLE_DEVICES=0,1` | Configure Kubelet `TopologyManager` + Volcano `PodGroup` |
-| **Evict Bad Hardware** | `scontrol drain <node>` | `kubectl cordon <node> && kubectl drain <node> --ignore-daemonsets` |
+| **Evict Bad Hardware** | `scontrol drain <node>` | Check PDB (`pdb_disruptions_allowed > 0`) -> `kubectl cordon <node> && kubectl drain <node> --ignore-daemonsets` |
+
+---
+
+## References
+
+1. NVIDIA System Management Interface (`nvidia-smi`) Reference: <https://developer.nvidia.com/system-management-interface>
+2. NVIDIA Data Center GPU Manager (DCGM) Architecture: <https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/index.html>
+3. Linux Control Group v2 Specification: <https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html>
+4. POSIX Shared Memory (`shm_overview`): <https://man7.org/linux/man-pages/man7/shm_overview.7.html>
+5. Prometheus Operator ServiceMonitor Label Handling: <https://prometheus-operator.dev/docs/operator/api/#monitoring.coreos.com/v1.Endpoint>
+

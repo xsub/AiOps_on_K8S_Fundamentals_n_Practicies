@@ -220,7 +220,7 @@ Assume market cloud pricing for H100 SXM5 instances:
 | :--- | :--- | :--- | :--- | :--- |
 | **100% On-Demand** (24 GPUs) | \$60.00 / hr | \$43,800 / month | \$525,600 / yr | **Inefficient**: Unnecessary 108% price premium for predictable baseline load. |
 | **100% 3-Year Reserved** (24 GPUs) | \$28.80 / hr | \$21,024 / month | \$252,288 / yr | **Risky**: Locks capital if model architectures or traffic patterns shift over 36 months. |
-| **Hybrid Tier (Recommended)**:<br>• 16 GPUs (8 replicas) on 1-Yr Commit (\$1.50/hr)<br>• 8 GPUs (4 replicas) Burstable Spot (\$0.95/hr) | \$31.60 / hr | \$23,068 / month | \$276,816 / yr | **OPTIMAL**: Secures 80% baseline SLA with reserved nodes while autoscaling peak bursts on spot via KEDA. **Saves \$248,784/yr (47.3%) vs on-demand!** |
+| **Hybrid Tier (Recommended)** (16 GPUs on 1-Yr Commit at \$1.50/hr + 8 GPUs Burstable Spot at \$0.95/hr) | \$31.60 / hr | \$23,068 / month | \$276,816 / yr | **OPTIMAL**: Secures 80% baseline SLA with reserved nodes while autoscaling peak bursts on spot via KEDA. **Saves \$248,784/yr (47.3%) vs on-demand!** |
 
 ### FinOps Optimization Best Practices
 1. **Calibrate KEDA Autoscaling to KV-Cache Utilization**:
@@ -229,3 +229,13 @@ Assume market cloud pricing for H100 SXM5 instances:
    For embeddings (e.g. `bge-large-en`) or rerankers, do not provision dedicated full GPUs. Slice an A100/H100 into `mig-1g.10gb` or `mig-2g.20gb` slices, multiplying density by up to $7\times$.
 3. **Enforce FP8 KV-Cache Across Clusters**:
    Halving KV-cache size per token directly doubles concurrent capacity per replica, cutting required GPU counts by up to 30% on memory-bound workloads.
+
+---
+
+## References
+
+1. Kubernetes Production Best Practices: <https://kubernetes.io/docs/setup/best-practices/>
+2. NVIDIA DGX H100 System Architecture & Capacity Planning: <https://www.nvidia.com/en-us/data-center/dgx-h100/>
+3. FinOps Foundation Framework & Cloud Unit Economics: <https://www.finops.org/framework/>
+4. vLLM Benchmark & Capacity Sizing Guides: <https://docs.vllm.ai/en/latest/performance/benchmarks.html>
+
