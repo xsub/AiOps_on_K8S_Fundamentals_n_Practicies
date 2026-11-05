@@ -18,6 +18,7 @@ fi
 
 kubectl config use-context "kind-${CLUSTER_NAME}" >/dev/null
 kubectl wait --for=condition=Ready node --all --timeout=90s
+kubectl label node --all aiops.k8s.io/gpu-profile=reference-twin nvidia.com/gpu.present=true --overwrite >/dev/null
 
 echo "==> [2/5] Building deterministic runtime container image (${IMAGE_TAG})..."
 docker build -t "${IMAGE_TAG}" -f "${REPO_ROOT}/reference-impl/Dockerfile" "${REPO_ROOT}"
