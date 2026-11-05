@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Overlay: LeaderWorkerSet (LWS) Multi-Node Serving + Kueue Fair-Sharing
+# Deploys Llama-3.1-405B across 2 nodes x 8 H100 (16 GPUs total) with Kueue queueing.
+
+resources:
+  - ../../base
+  - kueue-gpu-clusterqueue.yaml
+  - headless-service.yaml
+  - leaderworkerset-multinode-vllm.yaml

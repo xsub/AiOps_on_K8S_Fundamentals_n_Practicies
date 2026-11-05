@@ -1,0 +1,18 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-inference-pdb
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-inference
+    app.kubernetes.io/part-of: aiops-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+spec:
+  minAvailable: 1
+  selector:
+    matchExpressions:
+      - key: app.kubernetes.io/part-of
+        operator: In
+        values: ["aiops-inference", "aiops-scheduling", "aiops-inference-serving"]

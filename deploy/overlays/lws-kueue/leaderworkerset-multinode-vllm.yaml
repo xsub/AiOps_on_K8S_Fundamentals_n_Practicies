@@ -1,0 +1,184 @@
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm-llama3-405b-lws
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-llama3-405b
+    app.kubernetes.io/part-of: aiops-scheduling
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+          app: vllm-llama3-405b
+          app.kubernetes.io/name: vllm-llama3-405b
+          app.kubernetes.io/part-of: aiops-scheduling
+        annotations:
+          aiops.k8s.io/validation-status: "schema-and-policy-validated"
+          aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+      spec:
+        runtimeClassName: nvidia
+        nodeSelector:
+          nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+        subdomain: vllm-llama3-cluster
+        containers:
+          - name: vllm-leader
+            image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
+            command: ["/bin/bash", "-c"]
+            args:
+              - >
+                ray start --head --port=6379 --num-gpus=8 &&
+                python3 -c '
+                import os, time, sys, ray
+                ray.init(address="auto")
+                expected_nodes = int(os.environ.get("LWS_GROUP_SIZE", "2"))
+                expected_gpus = expected_nodes * 8
+                timeout = 300
+                start = time.time()
+                while time.time() - start < timeout:
+                    nodes = [n for n in ray.nodes() if n.get("Alive", False)]
+                    total_gpus = sum(n.get("Resources", {}).get("GPU", 0) for n in nodes)
+                    print(f"Waiting for LWS cluster: {len(nodes)}/{expected_nodes} nodes, {total_gpus}/{expected_gpus} GPUs alive...", flush=True)
+                    if len(nodes) >= expected_nodes and total_gpus >= expected_gpus:
+                        print("LWS barrier reached. Ray cluster fully initialized.", flush=True)
+                        sys.exit(0)
+                    time.sleep(2)
+                print("Timeout waiting for Ray worker nodes to join", file=sys.stderr)
+                sys.exit(1)
+                ' &&
+                python3 -m vllm.entrypoints.openai.api_server
+                --model meta-llama/Meta-Llama-3.1-405B-Instruct-FP8
+                --tensor-parallel-size 8
+                --pipeline-parallel-size 2
+                --distributed-executor-backend ray
+                --gpu-memory-utilization 0.90
+                --api-key "$VLLM_API_KEY"
+            env:
+              - name: VLLM_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: vllm-api-auth
+                    key: api-key
+              - name: NCCL_DEBUG
+                value: "INFO"
+              - name: NCCL_IB_DISABLE
+                value: "0"
+              - name: NCCL_IB_HCA
+                value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+              - name: NCCL_P2P_LEVEL
+                value: "NVL"
+            ports:
+              - name: http
+                containerPort: 8000
+              - name: ray-gcs
+                containerPort: 6379
+            startupProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              initialDelaySeconds: 60
+              periodSeconds: 10
+              failureThreshold: 30
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              periodSeconds: 10
+            livenessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              periodSeconds: 15
+            resources:
+              requests:
+                cpu: "64"
+                memory: "512Gi"
+                nvidia.com/gpu: "8"
+              limits:
+                cpu: "64"
+                memory: "512Gi"
+                nvidia.com/gpu: "8"
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+                add: ["IPC_LOCK"]
+              seccompProfile:
+                type: RuntimeDefault
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+    workerTemplate:
+      metadata:
+        labels:
+          role: worker
+          app: vllm-llama3-405b
+          app.kubernetes.io/name: vllm-llama3-405b
+          app.kubernetes.io/part-of: aiops-scheduling
+        annotations:
+          aiops.k8s.io/validation-status: "schema-and-policy-validated"
+          aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+      spec:
+        runtimeClassName: nvidia
+        nodeSelector:
+          nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+        subdomain: vllm-llama3-cluster
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
+            command: ["/bin/bash", "-c"]
+            args:
+              - >
+                ray start --address=$(LWS_LEADER_ADDRESS):6379 --num-gpus=8 --block
+            env:
+              - name: NCCL_DEBUG
+                value: "INFO"
+              - name: NCCL_IB_DISABLE
+                value: "0"
+              - name: NCCL_IB_HCA
+                value: "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7"
+              - name: NCCL_P2P_LEVEL
+                value: "NVL"
+            resources:
+              requests:
+                cpu: "64"
+                memory: "512Gi"
+                nvidia.com/gpu: "8"
+              limits:
+                cpu: "64"
+                memory: "512Gi"
+                nvidia.com/gpu: "8"
+            securityContext:
+              runAsNonRoot: true
+              runAsUser: 1000
+              runAsGroup: 1000
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop: ["ALL"]
+                add: ["IPC_LOCK"]
+              seccompProfile:
+                type: RuntimeDefault
+            volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+        volumes:
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi

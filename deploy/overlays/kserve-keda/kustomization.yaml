@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Overlay: KServe Canary Serving + Gateway API 90/10 Canary Routing
+# Deploys Llama-3.1-70B-Instruct-FP8 across stable and canary InferenceServices
+# with KEDA queue autoscaling on vllm:num_requests_waiting and Gateway HTTPRoute.
+
+resources:
+  - ../../base
+  - kserve-vllm-canary.yaml

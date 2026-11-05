@@ -1,0 +1,103 @@
+# Defense-in-Depth NetworkPolicy for AI Inference Workloads
+# Implements Default-Deny Ingress/Egress with explicit least-privilege allows:
+# - Ingress HTTP 8000 from Ingress Gateways (istio-system / envoy-gateway-system) and Monitoring
+# - Intra-cluster Ray (6379, 10001) and NCCL (29500) restricted strictly to inference group pods
+# - Egress UDP/TCP 53 for cluster CoreDNS resolution
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/part-of: aiops-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-vllm-traffic
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/part-of: aiops-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/part-of
+        operator: In
+        values: ["aiops-inference", "aiops-scheduling", "aiops-inference-serving"]
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Ingress TCP 8000 from Ingress Gateway controllers
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: ["istio-system", "envoy-gateway-system"]
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Ingress TCP 8000 from Prometheus monitoring
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: ["monitoring"]
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Intra-cluster Ray (6379, 10001) and NCCL (29500) within inference workloads
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/part-of
+                operator: In
+                values: ["aiops-inference", "aiops-scheduling", "aiops-inference-serving"]
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 10001
+        - protocol: TCP
+          port: 29500
+  egress:
+    # Cluster DNS egress to kube-dns / CoreDNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Intra-cluster Ray & NCCL egress to peer pods
+    - to:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/part-of
+                operator: In
+                values: ["aiops-inference", "aiops-scheduling", "aiops-inference-serving"]
+      ports:
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 10001
+        - protocol: TCP
+          port: 29500

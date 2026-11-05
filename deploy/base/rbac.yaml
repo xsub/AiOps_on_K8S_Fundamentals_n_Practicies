@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-inference-sa
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-inference
+    app.kubernetes.io/part-of: aiops-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vllm-inference-role
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-inference
+    app.kubernetes.io/part-of: aiops-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vllm-inference-rb
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-inference
+    app.kubernetes.io/part-of: aiops-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+subjects:
+  - kind: ServiceAccount
+    name: vllm-inference-sa
+    namespace: ai-inference
+roleRef:
+  kind: Role
+  name: vllm-inference-role
+  apiGroup: rbac.authorization.k8s.io

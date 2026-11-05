@@ -1,0 +1,93 @@
+# Kubernetes SIGs Kueue — GPU ClusterQueue & Cohort Fair-Sharing Configuration
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: h100-sxm5
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+spec:
+  nodeLabels:
+    nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+    nvidia.com/gpu.present: "true"
+  nodeTaints:
+    - key: nvidia.com/gpu
+      value: "present"
+      effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ResourceFlavor
+metadata:
+  name: a100-mig-2g20gb
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+spec:
+  nodeLabels:
+    nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+    nvidia.com/gpu.mig.config: "all-2g.20gb"
+  nodeTaints:
+    - key: nvidia.com/gpu.mig
+      value: "present"
+      effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: ClusterQueue
+metadata:
+  name: cq-ai-platform-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+spec:
+  cohort: ai-platform-cohort
+  namespaceSelector: {}
+  queueingStrategy: StrictFIFO
+  preemption:
+    reclaimWithinCohort: Any
+    withinClusterQueue: LowerPriority
+    borrowWithinCohort:
+      policy: LowerPriority
+  fairSharing:
+    weight: 100
+  resourceGroups:
+    - coveredResources: ["nvidia.com/gpu", "cpu", "memory"]
+      flavors:
+        - name: h100-sxm5
+          resources:
+            - name: "nvidia.com/gpu"
+              nominalQuota: 16
+              borrowingLimit: 8
+              lendingLimit: 8
+            - name: "cpu"
+              nominalQuota: 128
+              borrowingLimit: 64
+              lendingLimit: 64
+            - name: "memory"
+              nominalQuota: 1024Gi
+              borrowingLimit: 512Gi
+              lendingLimit: 512Gi
+        - name: a100-mig-2g20gb
+          resources:
+            - name: "nvidia.com/gpu"
+              nominalQuota: 14
+              borrowingLimit: 7
+              lendingLimit: 7
+            - name: "cpu"
+              nominalQuota: 56
+              borrowingLimit: 28
+              lendingLimit: 28
+            - name: "memory"
+              nominalQuota: 448Gi
+              borrowingLimit: 224Gi
+              lendingLimit: 224Gi
+---
+apiVersion: kueue.x-k8s.io/v1beta1
+kind: LocalQueue
+metadata:
+  name: inference-queue
+  namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+spec:
+  clusterQueue: cq-ai-platform-inference
