@@ -4,6 +4,9 @@ apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
   name: h100-sxm5
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   nodeLabels:
     nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
@@ -17,6 +20,9 @@ apiVersion: kueue.x-k8s.io/v1beta1
 kind: ResourceFlavor
 metadata:
   name: a100-mig-2g20gb
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   nodeLabels:
     nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
@@ -30,6 +36,9 @@ apiVersion: kueue.x-k8s.io/v1beta1
 kind: ClusterQueue
 metadata:
   name: cq-ai-platform-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 spec:
   cohort: ai-platform-cohort
   namespaceSelector: {}
@@ -78,5 +87,8 @@ kind: LocalQueue
 metadata:
   name: inference-queue
   namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 spec:
   clusterQueue: cq-ai-platform-inference

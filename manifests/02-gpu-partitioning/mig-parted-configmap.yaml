@@ -5,6 +5,9 @@ kind: ConfigMap
 metadata:
   name: custom-mig-parted-configs
   namespace: gpu-operator
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 data:
   config.yaml: |-
     version: v1

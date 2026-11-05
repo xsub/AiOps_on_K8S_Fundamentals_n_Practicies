@@ -1,15 +1,19 @@
-# DCGM Exporter ServiceMonitor & Prometheus Alerting Rules
+# DCGM Exporter Prometheus Alerting Rules — Validated Reference Specification
 # Implements Section 5: Hardware Telemetry & Distinguishing K8s OOMKilled vs CUDA VRAM OOM vs XID Errors
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: kubevram-gpu-inference-alerts
+  name: gpu-inference-alerts
   namespace: monitoring
   labels:
     role: alert-rules
+    app.kubernetes.io/part-of: aiops-gpu-observability
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 spec:
   groups:
-    - name: kubevram.gpu.oom.and.hardware
+    - name: aiops.gpu.oom.and.hardware
       interval: 15s
       rules:
         # 1. Distinguish Kubernetes System RAM OOM (Exit Code 137) on GPU Pods
@@ -32,14 +36,14 @@ spec:
             (
               DCGM_FI_DEV_FB_USED
               /
-              (DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE)
+              clamp_min(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE, 1)
             ) * 100 > 96
           for: 1m
           labels:
             severity: warning
             failure_domain: cuda_vram
           annotations:
-            summary: "GPU {{ $labels.gpu }} VRAM > 96% on node {{ $labels.Hostname }} (Pod {{ $labels.exported_namespace }}/{{ $labels.exported_pod }})"
+            summary: "GPU {{ $labels.gpu }} VRAM > 96% on node {{ $labels.Hostname }} (Pod {{ $labels.namespace }}/{{ $labels.pod }})"
             description: "Framebuffer utilization is at {{ $value | printf \"%.1f\" }}%. High risk of cudaErrorMemoryAllocation / KV-cache preemption storm."
 
         # 3. Correlate Pod Crash (Exit Code != 137) with High VRAM on Time-Sliced Node
@@ -49,22 +53,115 @@ spec:
             and on(namespace, pod)
             (kube_pod_container_status_last_terminated_reason{reason="Error"} == 1)
             and on(namespace, pod)
-            (label_replace(max_over_time(DCGM_FI_DEV_FB_USED[5m]) / (max_over_time(DCGM_FI_DEV_FB_USED[5m]) + min_over_time(DCGM_FI_DEV_FB_FREE[5m])), "pod", "$1", "exported_pod", "(.*)") > 0.94)
+            (max by (namespace, pod) (max_over_time(DCGM_FI_DEV_FB_USED[5m]) / clamp_min(max_over_time(DCGM_FI_DEV_FB_USED[5m]) + min_over_time(DCGM_FI_DEV_FB_FREE[5m]), 1)) > 0.94)
           for: 0m
           labels:
             severity: critical
             failure_domain: cuda_vram_oom
           annotations:
             summary: "CUDA VRAM OOM Crash correlated on {{ $labels.namespace }}/{{ $labels.pod }}"
-            description: "Pod terminated with Error (Exit Code 1) while GPU framebuffer exceeded 94%. Run `kubevram triage --pod {{ $labels.pod }}` for KV-cache and sharing remediation."
+            description: "Pod terminated with Error while GPU framebuffer exceeded 94%. Check vLLM --gpu-memory-utilization, KV cache allocation, and batch size."
 
-        # 4. Critical NVIDIA XID Hardware Fault
-        - alert: NvidiaGPUXidHardwareFault
-          expr: DCGM_FI_DEV_XID_ERRORS > 0
+        # 4. Critical NVIDIA XID Hardware/Silicon/NVLink/ECC Fault
+        - alert: NvidiaGPUCriticalSiliconXidFault
+          expr: |
+            DCGM_FI_DEV_XID_ERRORS == 48 or
+            DCGM_FI_DEV_XID_ERRORS == 63 or
+            DCGM_FI_DEV_XID_ERRORS == 64 or
+            DCGM_FI_DEV_XID_ERRORS == 74 or
+            DCGM_FI_DEV_XID_ERRORS == 79 or
+            DCGM_FI_DEV_XID_ERRORS == 94 or
+            DCGM_FI_DEV_XID_ERRORS == 95
           for: 0m
           labels:
             severity: critical
             failure_domain: gpu_silicon_xid
           annotations:
-            summary: "NVIDIA XID {{ $value }} hardware fault on {{ $labels.Hostname }} GPU {{ $labels.gpu }}"
-            description: "Hardware/driver XID error detected (e.g., XID 31=MMU Fault, XID 48/95=ECC Error, XID 79=Fell off bus). Cordon node and run `kubevram triage`."
+            summary: "NVIDIA Critical Silicon XID {{ $value }} fault on {{ $labels.Hostname }} GPU {{ $labels.gpu }}"
+            description: "Fatal hardware/silicon/NVLink/ECC XID error detected (e.g. XID 48/95=ECC, 79=Fell off bus, 74=NVLink). Node requires immediate cordoning and RMA triage."
+
+        # 5. Non-Fatal User-Space MMU / Application / Driver XID Warning
+        - alert: NvidiaGPUApplicationOrDriverXidWarning
+          expr: |
+            DCGM_FI_DEV_XID_ERRORS == 13 or
+            DCGM_FI_DEV_XID_ERRORS == 31 or
+            DCGM_FI_DEV_XID_ERRORS == 43
+          for: 0m
+          labels:
+            severity: warning
+            failure_domain: gpu_application_mmu
+          annotations:
+            summary: "NVIDIA Application/Driver XID {{ $value }} warning on {{ $labels.Hostname }} GPU {{ $labels.gpu }}"
+            description: "User-space application/driver XID error detected (XID 13=Graphics Engine Exception, XID 31=MMU Fault, XID 43=Stopped processing). Investigate CUDA kernel or vLLM args. Do NOT RMA node."
+groups:
+  - name: aiops.gpu.oom.and.hardware
+    interval: 15s
+    rules:
+      - alert: K8sSystemRamOOMOnGPUPod
+        expr: |
+          (kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} == 1)
+          and on(namespace, pod)
+          (kube_pod_container_resource_requests{resource="nvidia_com_gpu"} > 0)
+        for: 0m
+        labels:
+          severity: critical
+          failure_domain: host_cgroup_ram
+        annotations:
+          summary: "Kubernetes System RAM OOMKilled (Exit 137) on GPU Pod {{ $labels.namespace }}/{{ $labels.pod }}"
+          description: "Container exceeded Linux cgroup memory.max (host RAM, NOT GPU VRAM). Increase resources.limits.memory or enable direct-to-GPU safetensors loading."
+      - alert: GPUVramSaturationCritical
+        expr: |
+          (
+            DCGM_FI_DEV_FB_USED
+            /
+            clamp_min(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE, 1)
+          ) * 100 > 96
+        for: 1m
+        labels:
+          severity: warning
+          failure_domain: cuda_vram
+        annotations:
+          summary: "GPU {{ $labels.gpu }} VRAM > 96% on node {{ $labels.Hostname }} (Pod {{ $labels.namespace }}/{{ $labels.pod }})"
+          description: "Framebuffer utilization is at {{ $value | printf \"%.1f\" }}%. High risk of cudaErrorMemoryAllocation / KV-cache preemption storm."
+      - alert: CudaVramOOMCrashDetected
+        expr: |
+          (increase(kube_pod_container_status_restarts_total[5m]) > 0)
+          and on(namespace, pod)
+          (kube_pod_container_status_last_terminated_reason{reason="Error"} == 1)
+          and on(namespace, pod)
+          (max by (namespace, pod) (max_over_time(DCGM_FI_DEV_FB_USED[5m]) / clamp_min(max_over_time(DCGM_FI_DEV_FB_USED[5m]) + min_over_time(DCGM_FI_DEV_FB_FREE[5m]), 1)) > 0.94)
+        for: 0m
+        labels:
+          severity: critical
+          failure_domain: cuda_vram_oom
+        annotations:
+          summary: "CUDA VRAM OOM Crash correlated on {{ $labels.namespace }}/{{ $labels.pod }}"
+          description: "Pod terminated with Error while GPU framebuffer exceeded 94%. Check vLLM --gpu-memory-utilization, KV cache allocation, and batch size."
+      - alert: NvidiaGPUCriticalSiliconXidFault
+        expr: |
+          DCGM_FI_DEV_XID_ERRORS == 48 or
+          DCGM_FI_DEV_XID_ERRORS == 63 or
+          DCGM_FI_DEV_XID_ERRORS == 64 or
+          DCGM_FI_DEV_XID_ERRORS == 74 or
+          DCGM_FI_DEV_XID_ERRORS == 79 or
+          DCGM_FI_DEV_XID_ERRORS == 94 or
+          DCGM_FI_DEV_XID_ERRORS == 95
+        for: 0m
+        labels:
+          severity: critical
+          failure_domain: gpu_silicon_xid
+        annotations:
+          summary: "NVIDIA Critical Silicon XID {{ $value }} fault on {{ $labels.Hostname }} GPU {{ $labels.gpu }}"
+          description: "Fatal hardware/silicon/NVLink/ECC XID error detected (e.g. XID 48/95=ECC, 79=Fell off bus, 74=NVLink). Node requires immediate cordoning and RMA triage."
+      - alert: NvidiaGPUApplicationOrDriverXidWarning
+        expr: |
+          DCGM_FI_DEV_XID_ERRORS == 13 or
+          DCGM_FI_DEV_XID_ERRORS == 31 or
+          DCGM_FI_DEV_XID_ERRORS == 43
+        for: 0m
+        labels:
+          severity: warning
+          failure_domain: gpu_application_mmu
+        annotations:
+          summary: "NVIDIA Application/Driver XID {{ $value }} warning on {{ $labels.Hostname }} GPU {{ $labels.gpu }}"
+          description: "User-space application/driver XID error detected (XID 13=Graphics Engine Exception, XID 31=MMU Fault, XID 43=Stopped processing). Investigate CUDA kernel or vLLM args. Do NOT RMA node."

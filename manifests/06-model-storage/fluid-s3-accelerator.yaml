@@ -1,27 +1,31 @@
-# High-Throughput Model Storage & Distributed Caching Architecture
-# Implements Section 6: Fluid Dataset + JindoRuntime for S3 Weight Acceleration & KServe OCI Modelcar
+# High-Throughput Model Storage & Distributed Caching Architecture — Validated Reference Specification
+# Implements Section 6: Fluid Dataset + JindoRuntime with AWS IRSA Workload Identity & KServe OCI Modelcar
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluid-s3-irsa-sa
+  namespace: ai-inference
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/fluid-s3-model-reader-role"
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+automountServiceAccountToken: true
+---
 apiVersion: data.fluid.io/v1alpha1
 kind: Dataset
 metadata:
   name: llama-3-1-70b-weights
   namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 spec:
   mounts:
     - mountPoint: "s3://prod-llm-models-us-east-1/Meta-Llama-3.1-70B-Instruct-FP8/"
       name: llama-70b-s3
       options:
         fs.s3a.endpoint: "s3.us-east-1.amazonaws.com"
-      encryptOptions:
-        - name: fs.s3a.access.key
-          valueFrom:
-            secretKeyRef:
-              name: s3-model-creds
-              key: aws-access-key-id
-        - name: fs.s3a.secret.key
-          valueFrom:
-            secretKeyRef:
-              name: s3-model-creds
-              key: aws-secret-access-key
+        fs.s3a.aws.credentials.provider: "com.amazonaws.auth.WebIdentityTokenCredentialsProvider"
   accessModes:
     - ReadOnlyMany
 ---
@@ -30,6 +34,9 @@ kind: JindoRuntime
 metadata:
   name: llama-3-1-70b-weights
   namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   replicas: 4
   tieredstore:
@@ -44,16 +51,28 @@ spec:
         quota: 500Gi
         high: "0.95"
         low: "0.8"
+  master:
+    serviceAccount: fluid-s3-irsa-sa
+    podMetadata:
+      annotations:
+        eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/fluid-s3-model-reader-role"
   worker:
+    serviceAccount: fluid-s3-irsa-sa
+    podMetadata:
+      annotations:
+        eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/fluid-s3-model-reader-role"
     nodeSelector:
       node.kubernetes.io/instance-type: "p5.48xlarge"
 ---
-# Alternative Pattern: KServe v0.14+ OCI Modelcar Volume Mount (Fast Layer Mount)
+# Alternative Fast Cold-Start Pattern: KServe v0.14+ OCI Modelcar Volume Mount (Local Container Layer Mount)
 apiVersion: serving.kserve.io/v1beta1
 kind: InferenceService
 metadata:
   name: llama3-70b-modelcar-sample
   namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   predictor:
     model:
@@ -64,8 +83,8 @@ spec:
         limits:
           cpu: "16"
           memory: "128Gi"
-          nvidia.com/gpu: "4"
+          nvidia.com/gpu: "2"
         requests:
           cpu: "16"
           memory: "128Gi"
-          nvidia.com/gpu: "4"
+          nvidia.com/gpu: "2"

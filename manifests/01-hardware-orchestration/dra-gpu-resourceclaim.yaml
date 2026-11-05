@@ -4,6 +4,9 @@ apiVersion: resource.k8s.io/v1beta1
 kind: DeviceClass
 metadata:
   name: gpu.nvidia.com
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 spec:
   selectors:
     - cel:
@@ -14,6 +17,9 @@ kind: ResourceClaimTemplate
 metadata:
   name: h100-gpu-claim-template
   namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   spec:
     devices:
@@ -31,6 +37,9 @@ kind: Pod
 metadata:
   name: vllm-dra-inference
   namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   restartPolicy: Never
   runtimeClassName: nvidia
@@ -39,12 +48,19 @@ spec:
       resourceClaimTemplateName: h100-gpu-claim-template
   containers:
     - name: vllm-inference
-      image: vllm/vllm-openai:v0.6.4
+      image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
       command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
       args:
         - "--model=meta-llama/Meta-Llama-3.1-8B-Instruct"
         - "--gpu-memory-utilization=0.90"
         - "--max-model-len=8192"
+        - "--api-key=$(VLLM_API_KEY)"
+      env:
+        - name: VLLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vllm-api-auth
+              key: api-key
       resources:
         claims:
           - name: gpu-claim
@@ -55,9 +71,15 @@ spec:
           cpu: "16"
           memory: "64Gi"
       securityContext:
-        privileged: false
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        allowPrivilegeEscalation: false
         capabilities:
           drop: ["ALL"]
+          add: ["IPC_LOCK"]
+        seccompProfile:
+          type: RuntimeDefault
       volumeMounts:
         - name: dshm
           mountPath: /dev/shm

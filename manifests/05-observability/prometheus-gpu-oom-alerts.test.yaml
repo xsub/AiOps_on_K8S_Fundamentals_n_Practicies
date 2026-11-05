@@ -1,0 +1,120 @@
+# Promtool Rule Unit Test Specification
+# Validates Section 5 Alert Rules for AI Inference Workloads
+rule_files:
+  - prometheus-gpu-oom-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      # 1. Host RAM OOMKilled (Exit Code 137) on GPU Pod
+      - series: 'kube_pod_container_status_last_terminated_reason{namespace="ai-inference", pod="vllm-host-oom", container="vllm-server", reason="OOMKilled"}'
+        values: '1 1 1 1 1'
+      - series: 'kube_pod_container_resource_requests{namespace="ai-inference", pod="vllm-host-oom", container="vllm-server", resource="nvidia_com_gpu"}'
+        values: '1 1 1 1 1'
+
+      # 2. Framebuffer VRAM Saturation > 96%
+      - series: 'DCGM_FI_DEV_FB_USED{namespace="ai-inference", pod="vllm-vram-sat", container="vllm-server", Hostname="gpu-node-01", gpu="0", UUID="GPU-001"}'
+        values: '97 97 97 97 97'
+      - series: 'DCGM_FI_DEV_FB_FREE{namespace="ai-inference", pod="vllm-vram-sat", container="vllm-server", Hostname="gpu-node-01", gpu="0", UUID="GPU-001"}'
+        values: '3 3 3 3 3'
+
+      # 3. Correlated CUDA VRAM OOM Crash (Exit Code 1 with VRAM > 94%)
+      - series: 'kube_pod_container_status_restarts_total{namespace="ai-inference", pod="vllm-vram-crash", container="vllm-server"}'
+        values: '0 0 0 1 1'
+      - series: 'kube_pod_container_status_last_terminated_reason{namespace="ai-inference", pod="vllm-vram-crash", container="vllm-server", reason="Error"}'
+        values: '0 0 0 1 1'
+      - series: 'DCGM_FI_DEV_FB_USED{namespace="ai-inference", pod="vllm-vram-crash", container="vllm-server", Hostname="gpu-node-02", gpu="1", UUID="GPU-002"}'
+        values: '95 95 95 95 95'
+      - series: 'DCGM_FI_DEV_FB_FREE{namespace="ai-inference", pod="vllm-vram-crash", container="vllm-server", Hostname="gpu-node-02", gpu="1", UUID="GPU-002"}'
+        values: '5 5 5 5 5'
+
+      # 4. Critical Hardware/Silicon XID Fault (XID 79: Fell off bus; XID 95: Uncontained ECC error)
+      - series: 'DCGM_FI_DEV_XID_ERRORS{namespace="ai-inference", pod="vllm-xid-crit", container="vllm-server", Hostname="gpu-node-03", gpu="2", UUID="GPU-003"}'
+        values: '79 79 79 79 79'
+
+      # 5. Non-Fatal User-Space Application/MMU Warning (XID 31: MMU Fault)
+      - series: 'DCGM_FI_DEV_XID_ERRORS{namespace="ai-inference", pod="vllm-xid-warn", container="vllm-server", Hostname="gpu-node-04", gpu="3", UUID="GPU-004"}'
+        values: '31 31 31 31 31'
+
+    alert_rule_test:
+      # Test 1: Exit 137 Host RAM OOM fires immediately
+      - eval_time: 1m
+        alertname: K8sSystemRamOOMOnGPUPod
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              failure_domain: host_cgroup_ram
+              namespace: ai-inference
+              pod: vllm-host-oom
+              container: vllm-server
+              reason: OOMKilled
+            exp_annotations:
+              summary: "Kubernetes System RAM OOMKilled (Exit 137) on GPU Pod ai-inference/vllm-host-oom"
+              description: "Container exceeded Linux cgroup memory.max (host RAM, NOT GPU VRAM). Increase resources.limits.memory or enable direct-to-GPU safetensors loading."
+
+      # Test 2: VRAM Saturation > 96% fires after 1m threshold
+      - eval_time: 2m
+        alertname: GPUVramSaturationCritical
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              failure_domain: cuda_vram
+              namespace: ai-inference
+              pod: vllm-vram-sat
+              container: vllm-server
+              Hostname: gpu-node-01
+              gpu: "0"
+              UUID: GPU-001
+            exp_annotations:
+              summary: "GPU 0 VRAM > 96% on node gpu-node-01 (Pod ai-inference/vllm-vram-sat)"
+              description: "Framebuffer utilization is at 97.0%. High risk of cudaErrorMemoryAllocation / KV-cache preemption storm."
+
+      # Test 3: Correlated CUDA VRAM OOM crash detection on pod restart + error
+      - eval_time: 4m
+        alertname: CudaVramOOMCrashDetected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              failure_domain: cuda_vram_oom
+              namespace: ai-inference
+              pod: vllm-vram-crash
+              container: vllm-server
+            exp_annotations:
+              summary: "CUDA VRAM OOM Crash correlated on ai-inference/vllm-vram-crash"
+              description: "Pod terminated with Error while GPU framebuffer exceeded 94%. Check vLLM --gpu-memory-utilization, KV cache allocation, and batch size."
+
+      # Test 4: Critical Silicon XID 79 triggers RMA-level critical alert
+      - eval_time: 1m
+        alertname: NvidiaGPUCriticalSiliconXidFault
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              failure_domain: gpu_silicon_xid
+              namespace: ai-inference
+              pod: vllm-xid-crit
+              container: vllm-server
+              Hostname: gpu-node-03
+              gpu: "2"
+              UUID: GPU-003
+            exp_annotations:
+              summary: "NVIDIA Critical Silicon XID 79 fault on gpu-node-03 GPU 2"
+              description: "Fatal hardware/silicon/NVLink/ECC XID error detected (e.g. XID 48/95=ECC, 79=Fell off bus, 74=NVLink). Node requires immediate cordoning and RMA triage."
+
+      # Test 5: Warning XID 31 triggers application-level warning (do NOT RMA node)
+      - eval_time: 1m
+        alertname: NvidiaGPUApplicationOrDriverXidWarning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              failure_domain: gpu_application_mmu
+              namespace: ai-inference
+              pod: vllm-xid-warn
+              container: vllm-server
+              Hostname: gpu-node-04
+              gpu: "3"
+              UUID: GPU-004
+            exp_annotations:
+              summary: "NVIDIA Application/Driver XID 31 warning on gpu-node-04 GPU 3"
+              description: "User-space application/driver XID error detected (XID 13=Graphics Engine Exception, XID 31=MMU Fault, XID 43=Stopped processing). Investigate CUDA kernel or vLLM args. Do NOT RMA node."

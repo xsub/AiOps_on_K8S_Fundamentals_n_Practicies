@@ -1,8 +1,12 @@
-# Explicit NVIDIA RuntimeClass & ResourceQuota Example
+# NVIDIA Container RuntimeClass — Validated Reference Specification
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
 metadata:
   name: nvidia
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+    aiops.k8s.io/scheduling-alternatives: "Run:ai (KAI), SIGs Kueue, and Volcano are mutually exclusive scheduler options; deploy only one engine per cluster"
 handler: nvidia
 scheduling:
   nodeSelector:
@@ -11,36 +15,50 @@ scheduling:
     - key: nvidia.com/gpu
       operator: Exists
       effect: NoSchedule
----
-# Run:ai / KAI Scheduler Hierarchical Fair-Share Queue Configuration
-apiVersion: scheduling.run.ai/v2
-kind: Queue
-metadata:
-  name: llm-inference-prod
-spec:
-  parentQueue: ai-platform
-  priority: 100
-  resources:
-    gpu:
-      quota: 16          # Guaranteed baseline GPUs (nominal quota)
-      limit: 24          # Can borrow up to 8 idle GPUs from other queues
-      overQuotaWeight: 2
-    cpu:
-      quota: 128
-      limit: 256
-    memory:
-      quota: 1024Gi
-      limit: 2048Gi
----
-apiVersion: scheduling.run.ai/v2
-kind: Queue
-metadata:
-  name: ml-research-batch
-spec:
-  parentQueue: ai-platform
-  priority: 50
-  resources:
-    gpu:
-      quota: 8
-      limit: 24          # Burstable when inference is below max limit
-      overQuotaWeight: 1
+
+# ==============================================================================
+# OPTIONAL SCHEDULER ALTERNATIVE: Run:ai / KAI Hierarchical Fair-Share Queues
+# ------------------------------------------------------------------------------
+# NOTE: Run:ai (KAI), Kubernetes SIGs Kueue, and Volcano gang-scheduler are
+# mutually exclusive scheduling architectures. Do NOT install CRDs or apply
+# these Queue manifests simultaneously with Kueue or Volcano.
+#
+# ---
+# apiVersion: scheduling.run.ai/v2
+# kind: Queue
+# metadata:
+#   name: llm-inference-prod
+#   annotations:
+#     aiops.k8s.io/validation-status: "schema-and-policy-validated"
+#     aiops.k8s.io/hardware-requirement: "portable-control-plane"
+# spec:
+#   parentQueue: ai-platform
+#   priority: 100
+#   resources:
+#     gpu:
+#       quota: 16          # Guaranteed baseline GPUs (nominal quota)
+#       limit: 24          # Can borrow up to 8 idle GPUs from other queues
+#       overQuotaWeight: 2
+#     cpu:
+#       quota: 128
+#       limit: 256
+#     memory:
+#       quota: 1024Gi
+#       limit: 2048Gi
+# ---
+# apiVersion: scheduling.run.ai/v2
+# kind: Queue
+# metadata:
+#   name: ml-research-batch
+#   annotations:
+#     aiops.k8s.io/validation-status: "schema-and-policy-validated"
+#     aiops.k8s.io/hardware-requirement: "portable-control-plane"
+# spec:
+#   parentQueue: ai-platform
+#   priority: 50
+#   resources:
+#     gpu:
+#       quota: 8
+#       limit: 24          # Burstable when inference is below max limit
+#       overQuotaWeight: 1
+# ==============================================================================

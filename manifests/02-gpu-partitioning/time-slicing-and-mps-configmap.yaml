@@ -5,6 +5,9 @@ kind: ConfigMap
 metadata:
   name: gpu-sharing-configs
   namespace: gpu-operator
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 data:
   default: |-
     version: v1
@@ -33,6 +36,9 @@ kind: ConfigMap
 metadata:
   name: mps-sharing-config
   namespace: gpu-operator
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 data:
   mps-rag-pipeline-2x: |-
     version: v1

@@ -1,21 +1,125 @@
-# Production KEDA ScaledObject for vLLM Inference Autoscaling
+# Standalone KEDA ScaledObject & Kubernetes Deployment for vLLM Inference Autoscaling
 # Implements Section 4: Queue- and KV-Cache-Aware Elasticity
-# Scaling on vllm:num_requests_waiting and vllm:gpu_cache_usage_perc with 600s scale-down stabilization
+#
+# ARCHITECTURAL NOTE ON KSERVE VS STANDALONE KEDA:
+# When deploying models with KServe, do NOT apply a standalone KEDA ScaledObject pointing to the
+# KServe-managed Deployment (e.g. *-predictor-default). That creates dual-controller reconciliation
+# conflicts between the KServe controller and the KEDA controller.
+# Instead, for KServe workloads, use the native KServe KEDA integration via annotations:
+#   serving.kserve.io/autoscalerClass: "keda"
+# A standalone KEDA ScaledObject should ONLY be used for native, unmanaged Kubernetes Deployments,
+# as demonstrated below.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama3-8b-standalone
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-llama3-8b-standalone
+    app.kubernetes.io/part-of: aiops-inference-serving
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm-llama3-8b-standalone
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm-llama3-8b-standalone
+      annotations:
+        aiops.k8s.io/validation-status: "schema-and-policy-validated"
+        aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+    spec:
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      containers:
+        - name: vllm-server
+          image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            - "--model=meta-llama/Meta-Llama-3-8B-Instruct"
+            - "--tensor-parallel-size=1"
+            - "--gpu-memory-utilization=0.90"
+            - "--max-model-len=8192"
+            - "--api-key=$(VLLM_API_KEY)"
+          env:
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-api-auth
+                  key: api-key
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: "16"
+              memory: "64Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "16"
+              memory: "64Gi"
+              nvidia.com/gpu: "1"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: vllm-llama3-70b-keda-autoscaler
+  name: vllm-llama3-8b-keda-autoscaler
   namespace: ai-inference
   labels:
     app.kubernetes.io/name: vllm-autoscaler
     app.kubernetes.io/part-of: aiops-inference-serving
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: llama3-1-70b-instruct-predictor-default
+    name: vllm-llama3-8b-standalone
   minReplicaCount: 2          # HA baseline; avoids catastrophic 120s VRAM cold start
-  maxReplicaCount: 10         # Maximum scaled capacity (10 replicas x 8 GPUs)
+  maxReplicaCount: 10         # Maximum scaled capacity
   pollingInterval: 5          # Scrape Prometheus every 5s for rapid queue detection
   cooldownPeriod: 600         # 10m cooldown period before terminating warm GPU pods
   advanced:
@@ -40,19 +144,17 @@ spec:
           selectPolicy: Min
   triggers:
     # Trigger 1: vLLM Waiting Request Queue Depth
-    # High waiting requests directly impact TTFT (Time-To-First-Token) SLA
     - type: prometheus
       metadata:
         serverAddress: http://prometheus-operated.monitoring.svc:9090
         metricName: vllm_num_requests_waiting
-        query: sum(vllm:num_requests_waiting{model_name="llama-3.1-70b-instruct"})
+        query: sum(vllm:num_requests_waiting{model_name="meta-llama/Meta-Llama-3-8B-Instruct"})
         threshold: "5"
 
     # Trigger 2: GPU KV-Cache Utilization Ratio
-    # Saturation above 0.80 (80%) triggers proactive scale-out before preemption storms occur
     - type: prometheus
       metadata:
         serverAddress: http://prometheus-operated.monitoring.svc:9090
         metricName: vllm_gpu_cache_usage_perc
-        query: avg(vllm:gpu_cache_usage_perc{model_name="llama-3.1-70b-instruct"})
+        query: avg(vllm:gpu_cache_usage_perc{model_name="meta-llama/Meta-Llama-3-8B-Instruct"})
         threshold: "0.80"

@@ -1,6 +1,65 @@
-# Node Problem Detector (NPD) Custom Plugin ConfigMap & DaemonSet for NVIDIA GPU Hardware Faults
-# Monitors kernel kmsg for fatal hardware XIDs (48, 63, 64, 74, 79, 94, 95)
-# Sets permanent NodeCondition: GPUHardwareFault and fires K8s events for automated remediation
+# Node Problem Detector (NPD) System Log Monitor & DaemonSet for NVIDIA GPU Hardware Faults
+# Monitors kernel /dev/kmsg for fatal hardware XIDs (48, 63, 64, 74, 79, 94, 95).
+#
+# OPERATIONAL REMEDIATION ARCHITECTURE:
+# Node Problem Detector is strictly a detection and reporting component; it updates
+# NodeCondition (GPUHardwareFault=True) and emits Kubernetes Events.
+# NPD does NOT perform automated cordoning or pod eviction itself. Node cordoning,
+# graceful draining, and RMA workflow triggering must be performed by a downstream
+# remediation controller (e.g. Draino, Kured, or an automated SRE operator)
+# that respects PodDisruptionBudgets (PDBs) and tenant SLA approval gates.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-problem-detector
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: node-problem-detector
+    app.kubernetes.io/part-of: aiops-gpu-observability
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-problem-detector
+  labels:
+    app.kubernetes.io/name: node-problem-detector
+    app.kubernetes.io/part-of: aiops-gpu-observability
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-problem-detector
+  labels:
+    app.kubernetes.io/name: node-problem-detector
+    app.kubernetes.io/part-of: aiops-gpu-observability
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: node-problem-detector
+subjects:
+  - kind: ServiceAccount
+    name: node-problem-detector
+    namespace: kube-system
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -9,6 +68,9 @@ metadata:
   labels:
     app.kubernetes.io/name: node-problem-detector
     app.kubernetes.io/part-of: aiops-gpu-observability
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 data:
   gpu-xid-monitor.json: |
     {
@@ -47,6 +109,9 @@ metadata:
   labels:
     app.kubernetes.io/name: gpu-node-problem-detector
     app.kubernetes.io/part-of: aiops-gpu-observability
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   selector:
     matchLabels:
@@ -55,21 +120,24 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: gpu-node-problem-detector
+      annotations:
+        aiops.k8s.io/validation-status: "schema-and-policy-validated"
+        aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
     spec:
+      serviceAccountName: node-problem-detector
       nodeSelector:
         nvidia.com/gpu.present: "true"
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
           effect: NoSchedule
-      serviceAccountName: node-problem-detector
       containers:
         - name: node-problem-detector
-          image: registry.k8s.io/node-problem-detector/node-problem-detector:v0.8.20
+          image: registry.k8s.io/node-problem-detector/node-problem-detector:v1.36.1@sha256:9bab11bfd97de4e303c7e6dab0169f60fb60daecc86deb4c40cb454eedaa6f15
           command:
             - "/node-problem-detector"
             - "--logtostderr"
-            - "--config.custom-plugin-monitor=/config/gpu-xid-monitor.json"
+            - "--config.system-log-monitor=/config/gpu-xid-monitor.json"
           securityContext:
             privileged: true
           volumeMounts:

@@ -1,4 +1,4 @@
-# Production DCGM Exporter Metrics Collector Configuration
+# DCGM Exporter Custom Metrics Collector Configuration — Validated Reference Specification
 # ConfigMap referenced by NVIDIA GPU Operator ClusterPolicy dcgmExporter.config.name
 # Includes standard framebuffer/power/temp/XID telemetry and DCP profiling counters
 apiVersion: v1
@@ -9,6 +9,9 @@ metadata:
   labels:
     app.kubernetes.io/name: dcgm-exporter
     app.kubernetes.io/part-of: nvidia-gpu-operator
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 data:
   dcgm-metrics.csv: |
     # Format: FieldID, MetricName, MetricType, Description

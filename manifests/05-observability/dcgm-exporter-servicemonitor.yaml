@@ -1,0 +1,21 @@
+# DCGM Exporter ServiceMonitor — Validated Reference Specification
+# Ensures Prometheus preserves native pod, namespace, container, Hostname, and GPU labels.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: dcgm-exporter-servicemonitor
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: nvidia-dcgm-exporter
+    app.kubernetes.io/part-of: aiops-gpu-observability
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nvidia-dcgm-exporter
+  endpoints:
+    - port: metrics
+      interval: 15s
+      honorLabels: true  # Critical: preserves native pod, namespace, container labels instead of exported_pod

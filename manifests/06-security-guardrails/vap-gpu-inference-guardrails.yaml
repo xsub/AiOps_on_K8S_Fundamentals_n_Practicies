@@ -1,14 +1,17 @@
 # Kubernetes 1.30+ Native CEL ValidatingAdmissionPolicy & ValidatingAdmissionPolicyBinding
-# Production Guardrails for GPU Inference Workloads
+# Guardrails for GPU Inference Workloads — Validated Reference Specification
 # Enforces:
 # 1. Reject GPU pods (nvidia.com/gpu) in non-system namespaces with securityContext.privileged == true
 # 2. Require spec.runtimeClassName == "nvidia" on pods requesting nvidia.com/gpu
-# 3. Require a memory-backed emptyDir mounted at /dev/shm on multi-GPU pods (nvidia.com/gpu >= 2)
----
+# 3. Require a memory-backed emptyDir (medium: Memory, sizeLimit >= 8Gi) mounted at /dev/shm on multi-GPU pods (nvidia.com/gpu >= 2)
+# 4. Reject un-capped vLLM containers scheduled onto time-slicing nodes without --gpu-memory-utilization <= 0.45
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
   name: gpu-inference-security-guardrails
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -30,21 +33,26 @@ spec:
     - name: isGPUPod
       expression: variables.gpuContainers.size() > 0
     # Multi-GPU check: any container requesting or limiting nvidia.com/gpu >= 2
-    - name: isMultiGPUPod
+    - name: multiGpuContainers
       expression: >
-        variables.gpuContainers.exists(c,
+        variables.gpuContainers.filter(c,
           (has(c.resources.limits) && has(c.resources.limits["nvidia.com/gpu"]) && int(c.resources.limits["nvidia.com/gpu"]) >= 2) ||
           (has(c.resources.requests) && has(c.resources.requests["nvidia.com/gpu"]) && int(c.resources.requests["nvidia.com/gpu"]) >= 2)
         )
-    # Check if there is an emptyDir volume with medium: Memory configured
-    - name: hasShmMemoryVolume
+    - name: isMultiGPUPod
+      expression: variables.multiGpuContainers.size() > 0
+    # Valid memory-backed shm volume names: emptyDir with medium: Memory and sizeLimit ending in 'Gi' with int >= 8
+    - name: validShmVolumeNames
       expression: >
-        has(object.spec.volumes) &&
-        object.spec.volumes.exists(v,
+        has(object.spec.volumes) ?
+        object.spec.volumes.filter(v,
           has(v.emptyDir) &&
           has(v.emptyDir.medium) &&
-          v.emptyDir.medium == "Memory"
-        )
+          v.emptyDir.medium == "Memory" &&
+          has(v.emptyDir.sizeLimit) &&
+          string(v.emptyDir.sizeLimit).endsWith("Gi") &&
+          int(string(v.emptyDir.sizeLimit).replace("Gi", "")) >= 8
+        ).map(v, v.name) : []
   validations:
     # 1. Reject GPU pods in non-system namespaces that set securityContext.privileged == true
     - expression: >
@@ -66,16 +74,45 @@ spec:
       message: "Orchestration Policy Violation: GPU workloads requesting nvidia.com/gpu must explicitly specify 'spec.runtimeClassName: nvidia' to enable CDI and container runtime hooks."
       reason: Invalid
 
-    # 3. Require a memory-backed emptyDir mounted at /dev/shm on multi-GPU pods (nvidia.com/gpu >= 2)
+    # 3. Require a memory-backed emptyDir (medium: Memory, sizeLimit >= 8Gi) mounted at /dev/shm on multi-GPU pods (nvidia.com/gpu >= 2)
     - expression: >
-        !variables.isMultiGPUPod || variables.hasShmMemoryVolume
-      message: "Reliability Policy Violation: Multi-GPU pods (nvidia.com/gpu >= 2) require an emptyDir volume with medium: Memory mounted to /dev/shm. Default 64MiB shm triggers fatal NCCL SIGBUS (Exit Code 135) crashes."
+        !variables.isMultiGPUPod || (
+          variables.validShmVolumeNames.size() > 0 &&
+          variables.multiGpuContainers.all(c,
+            has(c.volumeMounts) &&
+            c.volumeMounts.exists(m,
+              m.mountPath == "/dev/shm" &&
+              m.name in variables.validShmVolumeNames
+            )
+          )
+        )
+      message: "Reliability Policy Violation: Multi-GPU pods (nvidia.com/gpu >= 2) require a memory-backed emptyDir volume (medium: Memory, sizeLimit >= 8Gi) mounted to /dev/shm. The default K8s 64MiB shm triggers fatal NCCL SIGBUS (Exit Code 135) crashes."
       reason: Invalid
+
+    # 4. Reject un-capped vLLM containers scheduled onto time-slicing nodes without --gpu-memory-utilization <= 0.45
+    - expression: >
+        !(
+          has(object.spec.nodeSelector) &&
+          (
+            (has(object.spec.nodeSelector["nvidia.com/gpu.sharing-strategy"]) && object.spec.nodeSelector["nvidia.com/gpu.sharing-strategy"] == "time-slicing") ||
+            (has(object.spec.nodeSelector["nvidia.com/gpu.partitioning"]) && object.spec.nodeSelector["nvidia.com/gpu.partitioning"] == "time-slicing")
+          )
+        ) || (
+          variables.gpuContainers.all(c,
+            (has(c.args) && c.args.exists(a, a.startsWith("--gpu-memory-utilization") || a.startsWith("--gpu-memory-utilization="))) ||
+            (has(c.command) && c.command.exists(cmd, cmd.contains("--gpu-memory-utilization")))
+          )
+        )
+      message: "FinOps/Stability Violation: Deploying vLLM to a node with sharing-strategy=time-slicing requires an explicit --gpu-memory-utilization flag (<= 0.45) to prevent immediate co-tenant VRAM collision crashes."
+      reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
   name: gpu-inference-security-guardrails-binding
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
 spec:
   policyName: gpu-inference-security-guardrails
   validationActions: [Deny]

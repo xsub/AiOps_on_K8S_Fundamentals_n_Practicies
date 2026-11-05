@@ -1,48 +1,205 @@
 # Volcano Gang Scheduling + NVLink Topology-Aware Distributed vLLM Serving
-# Guarantees atomic all-or-nothing placement of 2 pods x 4 H100 GPUs (8 GPUs total)
+# Guarantees atomic all-or-nothing placement of 2 pods x 8 H100 GPUs (16 GPUs total)
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-llama3-405b-headless
+  namespace: ai-inference
+  labels:
+    app: vllm-llama3-405b
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+spec:
+  clusterIP: None
+  selector:
+    app: vllm-llama3-405b
+  ports:
+    - name: ray-gcs
+      port: 6379
+      targetPort: 6379
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
 apiVersion: scheduling.volcano.sh/v1beta1
 kind: PodGroup
 metadata:
   name: llama3-405b-gang-group
   namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   minMember: 2
   minTaskMember:
     head: 1
     worker: 1
-  queue: llm-inference-prod
+  queue: default
   minResources:
     cpu: "64"
     memory: "512Gi"
-    nvidia.com/gpu: "8"
+    nvidia.com/gpu: "16"
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: vllm-llama3-405b-fp8
+  name: vllm-llama3-405b-head
   namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
 spec:
   serviceName: vllm-llama3-405b-headless
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: vllm-llama3-405b
+      role: head
   template:
     metadata:
       labels:
         app: vllm-llama3-405b
+        role: head
       annotations:
         scheduling.k8s.io/group-name: llama3-405b-gang-group
-        volcano.sh/task-spec: worker
+        volcano.sh/task-spec: head
+        aiops.k8s.io/validation-status: "schema-and-policy-validated"
+        aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
     spec:
       schedulerName: volcano
       runtimeClassName: nvidia
       nodeSelector:
         nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
-        nvidia.com/gpu.machine: "DGX-H100"
+      containers:
+        - name: vllm-head
+          image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
+          command: ["/bin/bash", "-c"]
+          args:
+            - >
+              ray start --head --port=6379 --num-gpus=8 &&
+              python3 -c '
+              import os, time, sys, ray
+              ray.init(address="auto")
+              timeout = 300
+              start = time.time()
+              while time.time() - start < timeout:
+                  nodes = [n for n in ray.nodes() if n.get("Alive", False)]
+                  total_gpus = sum(n.get("Resources", {}).get("GPU", 0) for n in nodes)
+                  print(f"Waiting for Volcano gang readiness: {len(nodes)}/2 nodes, {total_gpus}/16 GPUs ready...", flush=True)
+                  if len(nodes) >= 2 and total_gpus >= 16:
+                      print("Volcano gang readiness barrier reached. Ray cluster ready.", flush=True)
+                      sys.exit(0)
+                  time.sleep(2)
+              print("Timeout waiting for Volcano worker to join Ray cluster", file=sys.stderr)
+              sys.exit(1)
+              ' &&
+              python3 -m vllm.entrypoints.openai.api_server
+              --model meta-llama/Meta-Llama-3.1-405B-Instruct-FP8
+              --tensor-parallel-size 8
+              --pipeline-parallel-size 2
+              --distributed-executor-backend ray
+              --gpu-memory-utilization 0.90
+              --api-key "$VLLM_API_KEY"
+          env:
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-api-auth
+                  key: api-key
+            - name: NCCL_P2P_LEVEL
+              value: "NVL"
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: "spawn"
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: ray-gcs
+              containerPort: 6379
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: "32"
+              memory: "256Gi"
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "32"
+              memory: "256Gi"
+              nvidia.com/gpu: "8"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm-llama3-405b-worker
+  namespace: ai-inference
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+spec:
+  serviceName: vllm-llama3-405b-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-llama3-405b
+      role: worker
+  template:
+    metadata:
+      labels:
+        app: vllm-llama3-405b
+        role: worker
+      annotations:
+        scheduling.k8s.io/group-name: llama3-405b-gang-group
+        volcano.sh/task-spec: worker
+        aiops.k8s.io/validation-status: "schema-and-policy-validated"
+        aiops.k8s.io/hardware-requirement: "nvidia-gpu-nodes"
+    spec:
+      schedulerName: volcano
+      runtimeClassName: nvidia
+      nodeSelector:
+        nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
       containers:
         - name: vllm-worker
-          image: vllm/vllm-openai:v0.6.4
+          image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
+          command: ["/bin/bash", "-c"]
+          args:
+            - >
+              ray start --address=vllm-llama3-405b-head-0.vllm-llama3-405b-headless.ai-inference.svc.cluster.local:6379 --num-gpus=8 --block
           env:
             - name: NCCL_P2P_LEVEL
               value: "NVL"
@@ -54,17 +211,26 @@ spec:
             requests:
               cpu: "32"
               memory: "256Gi"
-              nvidia.com/gpu: "4"
+              nvidia.com/gpu: "8"
             limits:
               cpu: "32"
               memory: "256Gi"
-              nvidia.com/gpu: "4"
+              nvidia.com/gpu: "8"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["IPC_LOCK"]
+            seccompProfile:
+              type: RuntimeDefault
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
       volumes:
-        # Critical for NCCL AllReduce across GPUs — avoids 64Mi default /dev/shm SIGBUS crash
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 32Gi
+            sizeLimit: 64Gi

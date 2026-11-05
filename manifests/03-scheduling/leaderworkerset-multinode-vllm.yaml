@@ -26,15 +26,34 @@ spec:
         subdomain: vllm-llama3-cluster
         containers:
           - name: vllm-leader
-            image: vllm/vllm-openai:v0.6.4
+            image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
             command: ["/bin/bash", "-c"]
             args:
               - >
                 ray start --head --port=6379 --num-gpus=8 &&
+                python3 -c '
+                import os, time, sys, ray
+                ray.init(address="auto")
+                expected_nodes = int(os.environ.get("LWS_GROUP_SIZE", "2"))
+                expected_gpus = expected_nodes * 8
+                timeout = 300
+                start = time.time()
+                while time.time() - start < timeout:
+                    nodes = [n for n in ray.nodes() if n.get("Alive", False)]
+                    total_gpus = sum(n.get("Resources", {}).get("GPU", 0) for n in nodes)
+                    print(f"Waiting for LWS cluster: {len(nodes)}/{expected_nodes} nodes, {total_gpus}/{expected_gpus} GPUs alive...", flush=True)
+                    if len(nodes) >= expected_nodes and total_gpus >= expected_gpus:
+                        print("LWS barrier reached. Ray cluster fully initialized.", flush=True)
+                        sys.exit(0)
+                    time.sleep(2)
+                print("Timeout waiting for Ray worker nodes to join", file=sys.stderr)
+                sys.exit(1)
+                ' &&
                 python3 -m vllm.entrypoints.openai.api_server
                 --model meta-llama/Meta-Llama-3.1-405B-Instruct-FP8
                 --tensor-parallel-size 8
                 --pipeline-parallel-size 2
+                --distributed-executor-backend ray
                 --gpu-memory-utilization 0.90
             env:
               - name: NCCL_DEBUG
@@ -77,7 +96,7 @@ spec:
         subdomain: vllm-llama3-cluster
         containers:
           - name: vllm-worker
-            image: vllm/vllm-openai:v0.6.4
+            image: vllm/vllm-openai:v0.33.0@sha256:d825baf9ce4b1b6bfc5ecc7b79880c7e6748c65a72d697ce3d47607aafa84c6e
             command: ["/bin/bash", "-c"]
             args:
               - >
@@ -111,3 +130,27 @@ spec:
             emptyDir:
               medium: Memory
               sizeLimit: 64Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-llama3-cluster
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: vllm-llama3-405b
+    app.kubernetes.io/part-of: aiops-scheduling
+  annotations:
+    aiops.k8s.io/validation-status: "schema-and-policy-validated"
+    aiops.k8s.io/hardware-requirement: "portable-control-plane"
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: vllm-llama3-405b
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: ray-gcs
+      port: 6379
+      targetPort: 6379
