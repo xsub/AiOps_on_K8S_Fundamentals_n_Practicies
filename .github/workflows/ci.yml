@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  unit-and-semantic-tests:
+    name: Unit, Policy & AIOps Benchmark Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run strict semantic repository validator
+        run: python3 scripts/validate_repo.py
+
+      - name: Run unit and CEL admission policy test suites
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Run AIOps closed-loop benchmark evaluation
+        run: python3 -m aiops evaluate
+
+  k8s-schema-and-kustomize:
+    name: K8s CRD Schema & Kustomize Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python for yamllint
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install yamllint
+        run: pip install "yamllint==1.38.0"
+
+      - name: Lint YAML manifests, deploy overlays, and workflows
+        run: yamllint -c .yamllint.yml manifests/ deploy/ .github/
+
+      - name: Install Kustomize and Kubeconform
+        run: |
+          set -euo pipefail
+          KUSTOMIZE_VERSION="v5.5.0"
+          curl -fsSL "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2F${KUSTOMIZE_VERSION}/kustomize_${KUSTOMIZE_VERSION}_linux_amd64.tar.gz" | tar xz
+          sudo mv kustomize /usr/local/bin/
+          kustomize version
+
+          KUBECONFORM_VERSION="v0.6.7"
+          curl -fsSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar xz
+          sudo mv kubeconform /usr/local/bin/
+          kubeconform -v
+
+      - name: Validate Standalone Reference Manifests (Kubeconform Strict + CRD Catalog)
+        run: |
+          set -euo pipefail
+          find manifests -name '*.yaml' ! -name '*.test.yaml' | sort | xargs kubeconform \
+            -strict \
+            -ignore-missing-schemas \
+            -skip PodGroup \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            -summary
+
+      - name: Build Kustomize Overlays & Validate Schemas
+        run: |
+          set -euo pipefail
+          OVERLAYS=(
+            "deploy/base"
+            "deploy/overlays/kserve-keda"
+            "deploy/overlays/lws-kueue"
+            "deploy/overlays/volcano-gang"
+          )
+          for overlay in "${OVERLAYS[@]}"; do
+            echo "=== Building and validating overlay: ${overlay} ==="
+            kustomize build --load-restrictor LoadRestrictionsNone "${overlay}" | kubeconform \
+              -strict \
+              -ignore-missing-schemas \
+              -skip PodGroup \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -summary
+          done
+
+  prometheus-rules-test:
+    name: Prometheus Alerting Rules & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install promtool (Prometheus v3)
+        run: |
+          set -euo pipefail
+          PROM_VERSION="3.2.1"
+          curl -fsSL "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.linux-amd64.tar.gz" | tar xz
+          sudo mv "prometheus-${PROM_VERSION}.linux-amd64/promtool" /usr/local/bin/
+          promtool --version
+
+      - name: Check Prometheus alerting rules syntax
+        run: promtool check rules --ignore-unknown-fields manifests/05-observability/prometheus-gpu-oom-alerts.yaml
+
+      - name: Run Prometheus alert unit tests
+        run: promtool test rules --ignore-unknown-fields manifests/05-observability/prometheus-gpu-oom-alerts.test.yaml
+
+  security-scan:
+    name: IaC Security & Secret Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Trivy IaC Config Scanner
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: "config"
+          scan-ref: "."
+          severity: "HIGH,CRITICAL"
+          exit-code: "0"
+
+      - name: Run Gitleaks Secret Scanner
+        uses: gitleaks/gitleaks-action@v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
