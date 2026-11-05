@@ -19,12 +19,13 @@ No manifest in this repository claims unverified bare-metal hardware execution. 
 
 | Component | Validation Tier | Automated Verification Executed in CI |
 | :--- | :--- | :--- |
-| **`aiops/` Closed-Loop Engine** | `executed-and-benchmarked` | `47` unit/integration tests + `python3 -m aiops evaluate` (12 scenarios, 56 raw alerts) |
+| **[`reference-impl/`](./reference-impl/) Runnable Stack** | `live-kind-k8s-e2e-executed` | Boots real `kind` K8s `v1.37` cluster (`make deploy && make verify && make destroy`), enforces live `kube-apiserver` CEL admission, benchmarks SSE `TTFT`/`TPOT`/`$/1k reqs` ([report](./reference-impl/BENCHMARK_AND_EVIDENCE.md)), and verifies live `PDB` closed-loop AIOps |
+| **`aiops/` Closed-Loop Engine** | `executed-and-benchmarked` | `52` unit/integration tests + `python3 -m aiops evaluate` (12 scenarios, 56 raw alerts) |
 | **`deploy/` Kustomize Overlays** | `schema-and-kustomize-validated` | `kustomize build` (`base`, `kserve-keda`, `lws-kueue`, `volcano-gang`) + `kubeconform -strict` with CRD schemas |
-| **`manifests/` Reference Specs** | `schema-and-security-validated` | `kubeconform -strict` (37 resources), `@sha256` digest pinning, `yamllint`, `trivy config`, `gitleaks` |
+| **`manifests/` Reference Specs** | `schema-and-security-validated` | `kubeconform -strict` (53 resources), `@sha256` digest pinning, `yamllint`, `trivy config`, `gitleaks` |
 | **Prometheus / DCGM Alert Rules** | `promtool-unit-tested` | `promtool check rules` + `promtool test rules` ([`prometheus-gpu-oom-alerts.test.yaml`](./manifests/05-observability/prometheus-gpu-oom-alerts.test.yaml)) |
-| **CEL Admission Guardrails** | `policy-simulation-tested` | `16` positive, negative, and mount-evasion unit tests ([`test_admission_policies.py`](./tests/test_admission_policies.py)) |
-| **GPU Data-Plane Execution** | `requires-nvidia-gpu-nodes` | Requires physical Ampere/Hopper nodes (NVML, MIG silicon, RoCEv2/NVSwitch) |
+| **CEL Admission Guardrails** | `live-apiserver-and-unit-tested` | Enforced live on `kube-apiserver` in `kind` CI + `16` unit/evasion tests ([`test_admission_policies.py`](./tests/test_admission_policies.py)) |
+| **Bare-Metal GPU Silicon Specs** | `requires-nvidia-gpu-nodes` | Requires physical Ampere/Hopper nodes (`MIG` silicon, `NVLink`, `GPUDirect RDMA/GDS`) |
 
 ---
 
@@ -85,7 +86,14 @@ AiOps_on_K8S_Fundamentals_n_Practicies/
 │   ├── 05-observability/                                        # DCGM CSV, ServiceMonitor (honorLabels), NPD (kmsg), PromQL + tests
 │   ├── 06-model-storage/                                        # Fluid S3 NVMe cache with OIDC Workload Identity (IRSA)
 │   └── 06-security-guardrails/                                  # 4-rule Kubernetes CEL ValidatingAdmissionPolicy
-├── tests/                                                       # 47 Automated Unit, Policy & Manifest Invariant Tests
+├── reference-impl/                                              # End-to-End Runnable Kind K8s Reference Stack & Live Benchmark
+│   ├── app/                                                     # OpenBLAS GQA Transformer + Paged KV-Cache SSE Server & Live K8s AIOps Agent
+│   ├── benchmark/run_benchmark.py                               # Controlled SSE TTFT/TPOT/Throughput/Cost benchmark harness
+│   ├── k8s/                                                     # Kind cluster config, RBAC, live CEL VAP, NetworkPolicy, PDB & Deployments
+│   ├── scripts/                                                 # Reproducible deploy.sh, verify.sh & destroy.sh lifecycle scripts
+│   ├── evidence/                                                # Captured CI kubectl state, VAP denials, smoke test & raw CSV/JSON results
+│   └── BENCHMARK_AND_EVIDENCE.md                                # Methodology, live K8s outputs & Mermaid xychart-beta latency/cost charts
+├── tests/                                                       # 52 Automated Unit, Policy, Manifest & Live HTTP Integration Tests
 └── scripts/validate_repo.py                                     # 10-check semantic validator (digests, services, gangs, NPD, PromQL)
 ```
 
@@ -94,12 +102,17 @@ AiOps_on_K8S_Fundamentals_n_Practicies/
 ## Quickstart: Verification, Kustomize Build & AIOps Benchmark
 
 ```bash
-# Run full local CI pipeline (semantic validator + 47 unit tests + AIOps benchmark + kustomize + promtool)
+# End-to-End Runnable Kubernetes Reference Implementation (requires Docker + kind + kubectl):
+make deploy            # Boot kind K8s cluster, build/load image, apply RBAC/VAP/PDB/NetworkPolicy & pods
+make verify            # Verify live CEL denials, 401/200 SSE smoke test, TTFT/TPOT benchmark & AIOps PDB loop
+make destroy           # Tear down kind cluster cleanly
+
+# Run full fast local CI pipeline (validator + 52 unit tests + AIOps benchmark + kustomize + promtool):
 make ci
 
 # Or run individual verification steps:
 make validate          # 10-check semantic & security repository validator
-make test              # 47 unit tests (CEL guardrails, VRAM sizing math, PromQL, AIOps pipeline)
+make test              # 52 unit/integration tests (CEL guardrails, VRAM math, PromQL, HTTP SSE, AIOps)
 make evaluate-aiops    # Run 12-scenario AIOps benchmark (outputs Precision/Recall/F1 & noise reduction)
 make demo-aiops        # Walk through live alert storm -> RCA -> approval gate -> kubectl patch
 make kustomize-build   # Build deploy/base and all 3 overlays + kubeconform -strict schema check

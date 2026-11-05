@@ -50,3 +50,13 @@ flowchart LR
 
 - **Executed on Live Kubernetes in CI**: Full Kubernetes `v1.31+` control plane & kubelet (`kind`), live `kube-apiserver` CEL admission rejections, NetworkPolicy/RBAC/PDB state transitions (`replicas=1 -> BLOCKED_BY_PDB` vs `replicas=2 -> PENDING_APPROVAL`), real OpenBLAS matrix multiplications, Paged KV-Cache block allocation, and HTTP/1.1 SSE token streaming.
 - **Hardware Twin Boundary**: Because GitHub Actions standard runners use 4-vCPU AMD EPYC processors without physical NVIDIA H100 GPUs, tensor execution runs on CPU OpenBLAS and GPU framebuffer/XID counters are projected via a deterministic telemetry twin on `/metrics`. Absolute latency and throughput numbers reflect CPU execution on the reference runner, not H100 Tensor Core silicon.
+
+## Published Live Evidence & Benchmark Artifacts
+
+See [**BENCHMARK_AND_EVIDENCE.md**](./BENCHMARK_AND_EVIDENCE.md) for methodology, Mermaid latency/throughput/cost charts, and analysis, alongside raw CI outputs in [`evidence/`](./evidence/):
+
+- [`evidence/kubectl-cluster-state.txt`](./evidence/kubectl-cluster-state.txt) — Live `kubectl get` cluster inventory, `PodDisruptionBudget`, `NetworkPolicy`, and `AIOpsClosedLoopDiagnosis` Events.
+- [`evidence/vap-admission-live-output.txt`](./evidence/vap-admission-live-output.txt) — Live `kube-apiserver` CEL `ValidatingAdmissionPolicy` rejection outputs.
+- [`evidence/smoke-test-inference.json`](./evidence/smoke-test-inference.json) — `401` auth gate check, `/readyz` `/dev/shm` IPC probe, and `200` inference sample.
+- [`evidence/closed-loop-aiops-live.json`](./evidence/closed-loop-aiops-live.json) — Live `BLOCKED_BY_PDB` (`replicas=1`) → `PENDING_APPROVAL` (`replicas=2`) JSON audit trail.
+- [`evidence/benchmark-raw-results.csv`](./evidence/benchmark-raw-results.csv) & [`evidence/benchmark-raw-results.json`](./evidence/benchmark-raw-results.json) — Raw TTFT, TPOT, throughput, cold-start (`2.242 s`), and `$/1k reqs` measurements.

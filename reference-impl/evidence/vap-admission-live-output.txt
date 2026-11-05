@@ -1,0 +1,7 @@
+=== TEST 1: Privileged Container Rejection ===
+The pods "rogue-privileged-inference" is invalid: : ValidatingAdmissionPolicy 'ref-aiops-inference-guardrails' with binding 'ref-aiops-inference-guardrails-binding' denied request: Guardrail [Rule 1]: Privileged containers are forbidden; runAsNonRoot=true and allowPrivilegeEscalation=false are mandatory.
+[PASS] Privileged pod deterministically denied by kube-apiserver CEL policy.
+
+=== TEST 2: Unmounted /dev/shm Memory Volume Rejection ===
+The pods "unmounted-shm-inference" is invalid: : ValidatingAdmissionPolicy 'ref-aiops-inference-guardrails' with binding 'ref-aiops-inference-guardrails-binding' denied request: Guardrail [Rule 3]: Inference pods requiring IPC must mount a Memory-backed emptyDir volume at /dev/shm.
+[PASS] Unmounted /dev/shm pod deterministically denied by kube-apiserver CEL policy.

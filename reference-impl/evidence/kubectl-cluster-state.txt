@@ -1,0 +1,68 @@
+=== KUBERNETES VERSION ===
+Client Version: v1.37.1
+Kustomize Version: v5.8.1
+Server Version: v1.37.0
+
+=== NODES ===
+NAME                      STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                       KERNEL-VERSION             CONTAINER-RUNTIME
+aiops-ref-control-plane   Ready    control-plane   37s   v1.37.0   172.18.0.2    <none>        Debian GNU/Linux 13 (trixie)   7.0.0-1017-azure (amd64)   containerd://2.3.4
+
+=== VALIDATING ADMISSION POLICIES ===
+NAME                                                                                    VALIDATIONS   PARAMKIND   AGE
+validatingadmissionpolicy.admissionregistration.k8s.io/ref-aiops-inference-guardrails   4             <unset>     3s
+
+NAME                                                                                                   POLICYNAME                       PARAMREF   AGE
+validatingadmissionpolicybinding.admissionregistration.k8s.io/ref-aiops-inference-guardrails-binding   ref-aiops-inference-guardrails   <unset>    3s
+
+=== AI-INFERENCE NAMESPACE WORKLOADS, SERVICES, PDB & NETWORKPOLICIES ===
+NAME                               READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS         IMAGES                     SELECTOR
+deployment.apps/aiops-controller   1/1     1            1           2s    aiops-controller   aiops-ref-runtime:v1.0.0   app.kubernetes.io/name=aiops-controller
+deployment.apps/inference-engine   1/1     1            1           2s    inference-engine   aiops-ref-runtime:v1.0.0   app.kubernetes.io/name=inference-engine
+
+NAME                                    READY   STATUS    RESTARTS   AGE   IP           NODE                      NOMINATED NODE   READINESS GATES
+pod/aiops-controller-6b4446998-zrw74    1/1     Running   0          2s    10.244.0.6   aiops-ref-control-plane   <none>           <none>
+pod/inference-engine-6f579f5f5f-bj7ll   1/1     Running   0          2s    10.244.0.5   aiops-ref-control-plane   <none>           <none>
+
+NAME                       TYPE       CLUSTER-IP    EXTERNAL-IP   PORT(S)          AGE   SELECTOR
+service/inference-engine   NodePort   10.96.57.89   <none>        8000:30800/TCP   2s    app.kubernetes.io/name=inference-engine
+
+NAME                                       MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+poddisruptionbudget.policy/inference-pdb   1               N/A               0                     3s
+
+NAME                                                                 POD-SELECTOR                              AGE
+networkpolicy.networking.k8s.io/allow-inference-http-and-telemetry   app.kubernetes.io/name=inference-engine   3s
+networkpolicy.networking.k8s.io/default-deny-ingress                 <none>                                    3s
+
+NAME                                 AGE
+serviceaccount/aiops-controller-sa   3s
+serviceaccount/default               3s
+serviceaccount/inference-engine-sa   3s
+
+=== LIVE KUBERNETES EVENTS (INCLUDING AIOPS CLOSED-LOOP DIAGNOSIS) ===
+LAST SEEN   TYPE      REASON                     OBJECT                                   MESSAGE
+21s         Normal    NoPods                     poddisruptionbudget/inference-pdb        No matching pods found
+20s         Normal    SuccessfulCreate           replicaset/inference-engine-6f579f5f5f   Created pod: inference-engine-6f579f5f5f-bj7ll
+20s         Normal    Created                    pod/aiops-controller-6b4446998-zrw74     Container created
+20s         Normal    SuccessfulCreate           replicaset/aiops-controller-6b4446998    Created pod: aiops-controller-6b4446998-zrw74
+20s         Normal    ScalingReplicaSet          deployment/aiops-controller              Scaled up replica set aiops-controller-6b4446998 from 0 to 1
+20s         Normal    Scheduled                  pod/aiops-controller-6b4446998-zrw74     Successfully assigned ai-inference/aiops-controller-6b4446998-zrw74 to aiops-ref-control-plane
+20s         Normal    Pulled                     pod/aiops-controller-6b4446998-zrw74     Container image "aiops-ref-runtime:v1.0.0" already present on machine and can be accessed by the pod
+20s         Normal    ScalingReplicaSet          deployment/inference-engine              Scaled up replica set inference-engine-6f579f5f5f from 0 to 1
+20s         Normal    Scheduled                  pod/inference-engine-6f579f5f5f-bj7ll    Successfully assigned ai-inference/inference-engine-6f579f5f5f-bj7ll to aiops-ref-control-plane
+20s         Normal    Started                    pod/inference-engine-6f579f5f5f-bj7ll    Container started
+20s         Normal    Created                    pod/inference-engine-6f579f5f5f-bj7ll    Container created
+20s         Normal    Pulled                     pod/inference-engine-6f579f5f5f-bj7ll    Container image "aiops-ref-runtime:v1.0.0" already present on machine and can be accessed by the pod
+19s         Normal    Started                    pod/aiops-controller-6b4446998-zrw74     Container started
+16s         Warning   AIOpsClosedLoopDiagnosis   deployment/inference-engine              RootCause=CUDA_VRAM_KV_OVERFLOW | Action=RECONFIGURE_VLLM_VRAM_FOOTPRINT | Gate=PENDING_APPROVAL | PDB_disruptionsAllowed=0
+7s          Warning   AIOpsClosedLoopDiagnosis   deployment/inference-engine              RootCause=GPU_SILICON_XID_FAULT | Action=CORDON_AND_DRAIN_NODE | Gate=BLOCKED_BY_PDB | PDB_disruptionsAllowed=0
+6s          Normal    Started                    pod/inference-engine-6f579f5f5f-4rj54    Container started
+6s          Normal    Created                    pod/inference-engine-6f579f5f5f-4rj54    Container created
+6s          Normal    Pulled                     pod/inference-engine-6f579f5f5f-4rj54    Container image "aiops-ref-runtime:v1.0.0" already present on machine and can be accessed by the pod
+6s          Normal    Scheduled                  pod/inference-engine-6f579f5f5f-4rj54    Successfully assigned ai-inference/inference-engine-6f579f5f5f-4rj54 to aiops-ref-control-plane
+6s          Normal    SuccessfulCreate           replicaset/inference-engine-6f579f5f5f   Created pod: inference-engine-6f579f5f5f-4rj54
+6s          Normal    ScalingReplicaSet          deployment/inference-engine              Scaled up replica set inference-engine-6f579f5f5f from 1 to 2
+4s          Warning   AIOpsClosedLoopDiagnosis   deployment/inference-engine              RootCause=GPU_SILICON_XID_FAULT | Action=CORDON_AND_DRAIN_NODE | Gate=BLOCKED_BY_PDB | PDB_disruptionsAllowed=0
+0s          Normal    Killing                    pod/inference-engine-6f579f5f5f-4rj54    Stopping container inference-engine
+0s          Warning   AIOpsClosedLoopDiagnosis   deployment/inference-engine              RootCause=GPU_SILICON_XID_FAULT | Action=CORDON_AND_DRAIN_NODE | Gate=PENDING_APPROVAL | PDB_disruptionsAllowed=1
+0s          Normal    SuccessfulDelete           replicaset/inference-engine-6f579f5f5f   Deleted pod: inference-engine-6f579f5f5f-4rj54
+0s          Normal    ScalingReplicaSet          deployment/inference-engine              Scaled down replica set inference-engine-6f579f5f5f from 2 to 1

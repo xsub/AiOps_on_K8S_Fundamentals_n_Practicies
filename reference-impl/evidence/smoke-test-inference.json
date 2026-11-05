@@ -1,0 +1,37 @@
+{
+  "unauthenticated_http_status": 401,
+  "authenticated_http_status": 200,
+  "readyz": {
+    "status": "ready",
+    "backend": "numpy-openblas",
+    "shm_ipc_mounted": true,
+    "effective_kv_blocks": 115,
+    "used_kv_blocks": 0
+  },
+  "completion_sample": {
+    "id": "chatcmpl-2afc13ddfead",
+    "object": "chat.completion",
+    "created": 1793842440,
+    "model": "micro-gqa-llama-ref",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "inference inference inference tensor cache xid xid xid xid pdb [ok] [ok] latency cache xid pdb inference metric metric tpot pdb [ok] pdb pdb"
+        },
+        "finish_reason": "length"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 9,
+      "completion_tokens": 24,
+      "total_tokens": 33
+    },
+    "x_telemetry": {
+      "ttft_ms": 3.94,
+      "tpot_ms": 0.896,
+      "backend": "numpy-openblas"
+    }
+  }
+}

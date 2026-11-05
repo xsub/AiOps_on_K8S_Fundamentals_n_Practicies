@@ -1,0 +1,138 @@
+{
+  "phase_a_single_replica_pdb_blocked": {
+    "evaluated_at": "2026-11-05T01:34:11.968811+00:00",
+    "metrics_url": "http://inference-engine.ai-inference.svc.cluster.local:8000/metrics",
+    "telemetry_points_ingested": 75,
+    "anomalies_detected": 0,
+    "raw_alerts_triggered": 2,
+    "pdb_live_state": {
+      "source": "kubernetes-api-live",
+      "pdb_name": "inference-pdb",
+      "currentHealthy": 1,
+      "desiredHealthy": 1,
+      "disruptionsAllowed": 0
+    },
+    "correlated_incidents": [
+      {
+        "incident": {
+          "incident_id": "INC-3D59899D",
+          "root_cause_class": "GPU_SILICON_XID_FAULT",
+          "confidence": 0.99,
+          "severity": "critical",
+          "affected_node": "aiops-ref-control-plane",
+          "affected_pods": [
+            "inference-engine-6f579f5f5f-bj7ll"
+          ],
+          "raw_alert_ids": [
+            "live-kv-sat-1793842511",
+            "live-xid-79-1793842511"
+          ],
+          "anomalies": [],
+          "evidence": [
+            "Critical hardware XID [79] detected on node aiops-ref-control-plane (source: NPD/DCGM).",
+            "Silicon failure mode: PCIe link drop, uncontained ECC error, or GPU halted execution."
+          ],
+          "remediation": null
+        },
+        "remediation_plan": {
+          "action_type": "CORDON_AND_DRAIN_NODE",
+          "risk_tier": "CRITICAL_NODE_DRAIN",
+          "requires_approval": true,
+          "pdb_check_passed": false,
+          "approval_status": "BLOCKED_BY_PDB",
+          "approved_by": null,
+          "kubectl_commands": [
+            "kubectl cordon aiops-ref-control-plane",
+            "kubectl taint nodes aiops-ref-control-plane nvidia.com/gpu-hardware-fault=true:NoSchedule",
+            "kubectl drain aiops-ref-control-plane --delete-emptydir-data --ignore-daemonsets --force"
+          ],
+          "declarative_patch": {
+            "spec": {
+              "taints": [
+                {
+                  "key": "nvidia.com/gpu-hardware-fault",
+                  "value": "true",
+                  "effect": "NoSchedule"
+                }
+              ],
+              "unschedulable": true
+            }
+          },
+          "blast_radius_summary": "BLOCKED BY PDB: Drain on node aiops-ref-control-plane disallowed because pdb_disruptions_allowed=0. Automatic drain halted to protect service availability.",
+          "audit_log": [
+            "[2026-11-05T01:34:11.963384+00:00] Remediation plan generated for INC-3D59899D: BLOCKED_BY_PDB"
+          ]
+        },
+        "k8s_event_emitted": true
+      }
+    ]
+  },
+  "phase_b_scaled_replicas_pending_human_approval": {
+    "evaluated_at": "2026-11-05T01:34:18.074820+00:00",
+    "metrics_url": "http://inference-engine.ai-inference.svc.cluster.local:8000/metrics",
+    "telemetry_points_ingested": 150,
+    "anomalies_detected": 0,
+    "raw_alerts_triggered": 2,
+    "pdb_live_state": {
+      "source": "kubernetes-api-live",
+      "pdb_name": "inference-pdb",
+      "currentHealthy": 2,
+      "desiredHealthy": 1,
+      "disruptionsAllowed": 1
+    },
+    "correlated_incidents": [
+      {
+        "incident": {
+          "incident_id": "INC-59F4550F",
+          "root_cause_class": "GPU_SILICON_XID_FAULT",
+          "confidence": 0.99,
+          "severity": "critical",
+          "affected_node": "aiops-ref-control-plane",
+          "affected_pods": [
+            "inference-engine-6f579f5f5f-bj7ll"
+          ],
+          "raw_alert_ids": [
+            "live-kv-sat-1793842518",
+            "live-xid-79-1793842518"
+          ],
+          "anomalies": [],
+          "evidence": [
+            "Critical hardware XID [79] detected on node aiops-ref-control-plane (source: NPD/DCGM).",
+            "Silicon failure mode: PCIe link drop, uncontained ECC error, or GPU halted execution."
+          ],
+          "remediation": null
+        },
+        "remediation_plan": {
+          "action_type": "CORDON_AND_DRAIN_NODE",
+          "risk_tier": "CRITICAL_NODE_DRAIN",
+          "requires_approval": true,
+          "pdb_check_passed": true,
+          "approval_status": "PENDING_APPROVAL",
+          "approved_by": null,
+          "kubectl_commands": [
+            "kubectl cordon aiops-ref-control-plane",
+            "kubectl taint nodes aiops-ref-control-plane nvidia.com/gpu-hardware-fault=true:NoSchedule",
+            "kubectl drain aiops-ref-control-plane --delete-emptydir-data --ignore-daemonsets --force"
+          ],
+          "declarative_patch": {
+            "spec": {
+              "taints": [
+                {
+                  "key": "nvidia.com/gpu-hardware-fault",
+                  "value": "true",
+                  "effect": "NoSchedule"
+                }
+              ],
+              "unschedulable": true
+            }
+          },
+          "blast_radius_summary": "Critical hardware failure on node aiops-ref-control-plane. Cordon node, taint with NoSchedule, and drain all pods to healthy nodes for GPU RMA replacement.",
+          "audit_log": [
+            "[2026-11-05T01:34:18.069665+00:00] Remediation plan generated for INC-59F4550F: PENDING_APPROVAL"
+          ]
+        },
+        "k8s_event_emitted": true
+      }
+    ]
+  }
+}

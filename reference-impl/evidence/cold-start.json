@@ -1,0 +1,10 @@
+{
+  "cold_start_seconds": 2.242,
+  "readyz": {
+    "status": "ready",
+    "backend": "numpy-openblas",
+    "shm_ipc_mounted": true,
+    "effective_kv_blocks": 115,
+    "used_kv_blocks": 0
+  }
+}
