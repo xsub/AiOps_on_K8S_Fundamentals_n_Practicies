@@ -1,0 +1,27 @@
+# Negative Policy Fixture 2: Missing /dev/shm Memory emptyDir mount (MUST be rejected by ValidatingAdmissionPolicy)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unmounted-shm-inference
+  namespace: ai-inference
+  labels:
+    aiops.k8s.io/shm-ipc-required: "true"
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+  containers:
+    - name: inference
+      image: aiops-ref-runtime:v1.0.0
+      imagePullPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+  volumes:
+    - name: unused-shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 256Mi

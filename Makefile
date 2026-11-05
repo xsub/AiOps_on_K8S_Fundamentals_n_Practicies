@@ -1,4 +1,4 @@
-.PHONY: help validate test evaluate-aiops demo-aiops kustomize-build promtool-test ci clean
+.PHONY: help validate test evaluate-aiops demo-aiops kustomize-build promtool-test deploy verify destroy ci clean
 
 PYTHON ?= python3
 
@@ -29,8 +29,8 @@ kustomize-build:  ## Build Kustomize overlays and validate schemas if kubeconfor
 			fi; \
 		done; \
 		if command -v kubeconform >/dev/null 2>&1; then \
-			echo "Validating standalone manifests with kubeconform -strict..."; \
-			find manifests -name '*.yaml' ! -name '*.test.yaml' | sort | xargs kubeconform -strict -ignore-missing-schemas -skip PodGroup -schema-location default -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' -summary; \
+			echo "Validating standalone and reference-impl manifests with kubeconform -strict..."; \
+			find manifests reference-impl/k8s -name '*.yaml' ! -name '*.test.yaml' ! -name 'kind-config.yaml' | sort | xargs kubeconform -strict -ignore-missing-schemas -skip PodGroup -schema-location default -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' -summary; \
 		fi; \
 	elif command -v kubectl >/dev/null 2>&1; then \
 		echo "Building Kustomize overlays using kubectl kustomize..."; \
@@ -56,6 +56,15 @@ promtool-test:  ## Check PromQL syntax and run alert unit tests if promtool is a
 	else \
 		echo "promtool not installed in PATH; skipping promtool checks (run in CI)."; \
 	fi
+
+deploy:  ## Boot kind K8s cluster and deploy the runnable reference implementation
+	bash reference-impl/scripts/deploy.sh
+
+verify:  ## Verify live CEL admission policies, SSE smoke test, benchmark, and AIOps PDB loop
+	bash reference-impl/scripts/verify.sh
+
+destroy:  ## Tear down the local kind Kubernetes cluster cleanly
+	bash reference-impl/scripts/destroy.sh
 
 ci: validate test evaluate-aiops kustomize-build promtool-test  ## Run full local CI verification pipeline
 

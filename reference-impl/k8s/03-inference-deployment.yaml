@@ -1,0 +1,116 @@
+# Hardened Paged KV-Cache Inference Deployment & NodePort Service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-engine
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: inference-engine
+    app.kubernetes.io/part-of: aiops-reference-impl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: inference-engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: inference-engine
+        aiops.k8s.io/role: "inference-engine"
+        aiops.k8s.io/shm-ipc-required: "true"
+    spec:
+      serviceAccountName: inference-engine-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: inference-engine
+          image: aiops-ref-runtime:v1.0.0
+          imagePullPolicy: Never
+          args:
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--num-kv-blocks=128"
+            - "--block-size=16"
+            - "--gpu-memory-utilization=0.90"
+            - "--shm-dir=/dev/shm"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-api-auth
+                  key: api-key
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "2000m"
+              memory: "768Mi"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-engine
+  namespace: ai-inference
+  labels:
+    app.kubernetes.io/name: inference-engine
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: inference-engine
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 30800
+      protocol: TCP

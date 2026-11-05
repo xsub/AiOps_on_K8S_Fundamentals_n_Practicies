@@ -51,8 +51,8 @@ jobs:
       - name: Install yamllint
         run: pip install -r requirements-dev.txt
 
-      - name: Lint YAML manifests, deploy overlays, and workflows
-        run: yamllint -c .yamllint.yml manifests/ deploy/ .github/
+      - name: Lint YAML manifests, deploy overlays, reference-impl, and workflows
+        run: yamllint -c .yamllint.yml manifests/ deploy/ reference-impl/k8s/ .github/
 
       - name: Install Kustomize and Kubeconform
         run: |
@@ -67,10 +67,10 @@ jobs:
           sudo mv kubeconform /usr/local/bin/
           kubeconform -v
 
-      - name: Validate Standalone Reference Manifests (Kubeconform Strict + CRD Catalog)
+      - name: Validate Standalone & Reference Manifests (Kubeconform Strict + CRD Catalog)
         run: |
           set -euo pipefail
-          find manifests -name '*.yaml' ! -name '*.test.yaml' | sort | xargs kubeconform \
+          find manifests reference-impl/k8s -name '*.yaml' ! -name '*.test.yaml' ! -name 'kind-config.yaml' | sort | xargs kubeconform \
             -strict \
             -ignore-missing-schemas \
             -skip PodGroup \
@@ -140,3 +140,37 @@ jobs:
         uses: gitleaks/gitleaks-action@v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  e2e-kind-reference-impl:
+    name: Live Kind K8s Reference Implementation & Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install kind and kubectl
+        uses: helm/kind-action@v1.15.2
+        with:
+          install_only: "true"
+
+      - name: Deploy reference implementation to live kind cluster (make deploy)
+        run: make deploy
+
+      - name: Verify live CEL policies, SSE inference, benchmark & AIOps PDB loop (make verify)
+        run: make verify
+
+      - name: Upload live cluster evidence and measured benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-impl-evidence
+          path: reference-impl/evidence/
+
+      - name: Tear down kind cluster (make destroy)
+        if: always()
+        run: make destroy

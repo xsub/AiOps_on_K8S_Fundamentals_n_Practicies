@@ -1,0 +1,74 @@
+# Live Kubernetes v1 ValidatingAdmissionPolicy & Binding Enforced by kube-apiserver
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ref-aiops-inference-guardrails
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  validations:
+    - expression: >-
+        object.spec.containers.all(c,
+          (!has(c.securityContext) || !has(c.securityContext.privileged) || c.securityContext.privileged == false) &&
+          (
+            (has(c.securityContext) && has(c.securityContext.runAsNonRoot) && c.securityContext.runAsNonRoot == true) ||
+            (has(object.spec.securityContext) && has(object.spec.securityContext.runAsNonRoot) && object.spec.securityContext.runAsNonRoot == true)
+          ) &&
+          (has(c.securityContext) && has(c.securityContext.allowPrivilegeEscalation) && c.securityContext.allowPrivilegeEscalation == false)
+        )
+      message: "Guardrail [Rule 1]: Privileged containers are forbidden; runAsNonRoot=true and allowPrivilegeEscalation=false are mandatory."
+    - expression: >-
+        object.spec.containers.all(c,
+          has(c.securityContext) &&
+          has(c.securityContext.capabilities) &&
+          has(c.securityContext.capabilities.drop) &&
+          c.securityContext.capabilities.drop.exists(cap, cap == 'ALL')
+        )
+      message: "Guardrail [Rule 2]: All containers in ai-inference must drop ALL Linux capabilities."
+    - expression: >-
+        !has(object.metadata.labels) ||
+        !('aiops.k8s.io/shm-ipc-required' in object.metadata.labels) ||
+        object.metadata.labels['aiops.k8s.io/shm-ipc-required'] != 'true' ||
+        (
+          has(object.spec.volumes) &&
+          object.spec.containers.all(c,
+            has(c.volumeMounts) &&
+            c.volumeMounts.exists(vm,
+              vm.mountPath == '/dev/shm' &&
+              object.spec.volumes.exists(v,
+                v.name == vm.name &&
+                has(v.emptyDir) &&
+                has(v.emptyDir.medium) &&
+                v.emptyDir.medium == 'Memory'
+              )
+            )
+          )
+        )
+      message: "Guardrail [Rule 3]: Inference pods requiring IPC must mount a Memory-backed emptyDir volume at /dev/shm."
+    - expression: >-
+        !has(object.metadata.labels) ||
+        !('aiops.k8s.io/role' in object.metadata.labels) ||
+        object.metadata.labels['aiops.k8s.io/role'] != 'inference-engine' ||
+        object.spec.containers.all(c,
+          has(c.args) &&
+          c.args.exists(a, a.startsWith('--gpu-memory-utilization='))
+        )
+      message: "Guardrail [Rule 4]: Inference engine containers must explicitly set --gpu-memory-utilization."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ref-aiops-inference-guardrails-binding
+spec:
+  policyName: ref-aiops-inference-guardrails
+  validationActions:
+    - Deny
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        aiops.k8s.io/guardrails: "enabled"

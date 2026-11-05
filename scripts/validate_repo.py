@@ -89,6 +89,8 @@ def validate_markdown_links(repo_root: Path) -> Tuple[int, int, List[str]]:
     if readme.exists():
         md_files.append(readme)
     md_files.extend(sorted((repo_root / "docs").glob("*.md")))
+    if (repo_root / "reference-impl").exists():
+        md_files.extend(sorted((repo_root / "reference-impl").glob("*.md")))
 
     total_links = 0
     errors = []
@@ -135,6 +137,8 @@ def validate_mermaid_blocks(repo_root: Path) -> Tuple[int, int, List[str]]:
     if readme.exists():
         md_files.append(readme)
     md_files.extend(sorted((repo_root / "docs").glob("*.md")))
+    if (repo_root / "reference-impl").exists():
+        md_files.extend(sorted((repo_root / "reference-impl").glob("*.md")))
 
     total_blocks = 0
     errors = []

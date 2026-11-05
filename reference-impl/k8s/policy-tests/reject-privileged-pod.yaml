@@ -1,0 +1,14 @@
+# Negative Policy Fixture 1: Privileged container (MUST be rejected by ValidatingAdmissionPolicy)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rogue-privileged-inference
+  namespace: ai-inference
+spec:
+  containers:
+    - name: rogue
+      image: aiops-ref-runtime:v1.0.0
+      imagePullPolicy: Never
+      securityContext:
+        privileged: true
+        allowPrivilegeEscalation: true
