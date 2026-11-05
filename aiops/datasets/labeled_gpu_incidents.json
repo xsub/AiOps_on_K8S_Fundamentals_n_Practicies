@@ -1,0 +1,1721 @@
+{
+  "version": "1.0.0",
+  "dataset_description": "12 realistic multi-step GPU failure scenarios and benign bursts on Kubernetes, covering all 7 canonical root-cause classes, user-space CUDA XIDs, PDB gating, and false-positive suppression.",
+  "scenarios": [
+    {
+      "scenario_id": "SCENARIO-01-CGROUP-OOM",
+      "title": "Pod OOMKilled (Exit 137) during model weight loading on low host DRAM",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 137,
+        "gpu_vram_pct": 10.2,
+        "sharing_strategy": "none",
+        "pdb_disruptions_allowed": 1,
+        "pod_status": "CrashLoopBackOff",
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-01-01",
+          "timestamp": 1730764800.0,
+          "source": "kubelet",
+          "name": "KubePodCrashLooping",
+          "severity": "critical",
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-aaa-01",
+          "value": 137.0,
+          "annotations": {
+            "exit_code": "137",
+            "reason": "OOMKilled",
+            "message": "Container exceeded cgroup memory.max limit (64Gi) during safetensors deserialization"
+          }
+        },
+        {
+          "alert_id": "ALT-01-02",
+          "timestamp": 1730764805.0,
+          "source": "prometheus",
+          "name": "ContainerMemoryUsageNearLimit",
+          "severity": "warning",
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-aaa-01",
+          "value": 63.8,
+          "annotations": {
+            "threshold": "60Gi",
+            "current_working_set": "63.8Gi"
+          }
+        },
+        {
+          "alert_id": "ALT-01-03",
+          "timestamp": 1730764810.0,
+          "source": "prometheus",
+          "name": "LowGpuMemoryUtilizationDuringOOM",
+          "severity": "info",
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-aaa-01",
+          "value": 10.2,
+          "annotations": {
+            "fb_used_gib": "8.2",
+            "fb_total_gib": "80.0"
+          }
+        },
+        {
+          "alert_id": "ALT-01-04",
+          "timestamp": 1730764815.0,
+          "source": "kubelet",
+          "name": "KubeletContainerRestartBackoff",
+          "severity": "warning",
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-aaa-01",
+          "value": 3.0,
+          "annotations": {
+            "restart_count": "3"
+          }
+        },
+        {
+          "alert_id": "ALT-01-05",
+          "timestamp": 1730764818.0,
+          "source": "kubelet",
+          "name": "KubeletPodStatusSynced",
+          "severity": "info",
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-aaa-01",
+          "value": 0.0,
+          "annotations": {
+            "status": "Synced"
+          }
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730764700.0,
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "gpu_uuid": "GPU-aaa-01",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 8192.0
+        },
+        {
+          "timestamp": 1730764730.0,
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "gpu_uuid": "GPU-aaa-01",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 8200.0
+        },
+        {
+          "timestamp": 1730764760.0,
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "gpu_uuid": "GPU-aaa-01",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 8210.0
+        },
+        {
+          "timestamp": 1730764790.0,
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "gpu_uuid": "GPU-aaa-01",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 8205.0
+        },
+        {
+          "timestamp": 1730764700.0,
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "gpu_uuid": "GPU-aaa-01",
+          "metric": "container_memory_working_set_bytes",
+          "value": 16000000000.0
+        },
+        {
+          "timestamp": 1730764730.0,
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "gpu_uuid": "GPU-aaa-01",
+          "metric": "container_memory_working_set_bytes",
+          "value": 16200000000.0
+        },
+        {
+          "timestamp": 1730764760.0,
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "gpu_uuid": "GPU-aaa-01",
+          "metric": "container_memory_working_set_bytes",
+          "value": 16100000000.0
+        },
+        {
+          "timestamp": 1730764790.0,
+          "node": "gpu-node-worker-01",
+          "pod": "llama3-70b-vllm-789cf-1",
+          "gpu_uuid": "GPU-aaa-01",
+          "metric": "container_memory_working_set_bytes",
+          "value": 63800000000.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "K8S_CGROUP_MMAP_OOM",
+        "expected_risk_tier": "HIGH_MUTATION",
+        "expected_approval_status": "PENDING_APPROVAL"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-02-CUDA-VRAM-OVERFLOW",
+      "title": "CUDA VRAM OutOfMemoryError (Exit 1) on dedicated GPU during KV cache sizing",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 1,
+        "gpu_vram_pct": 99.0,
+        "sharing_strategy": "none",
+        "pdb_disruptions_allowed": 1,
+        "pod_status": "CrashLoopBackOff",
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-02-01",
+          "timestamp": 1730765000.0,
+          "source": "kubelet",
+          "name": "KubePodCrashLooping",
+          "severity": "critical",
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-bbb-02",
+          "value": 1.0,
+          "annotations": {
+            "exit_code": "1",
+            "reason": "Error",
+            "message": "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.20 GiB. GPU 0 has 79.15 GiB allocated"
+          }
+        },
+        {
+          "alert_id": "ALT-02-02",
+          "timestamp": 1730765005.0,
+          "source": "prometheus",
+          "name": "GpuFramebufferSaturationAlert",
+          "severity": "critical",
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-bbb-02",
+          "value": 99.0,
+          "annotations": {
+            "utilization_pct": "99.0"
+          }
+        },
+        {
+          "alert_id": "ALT-02-03",
+          "timestamp": 1730765010.0,
+          "source": "prometheus",
+          "name": "VllmKvCacheSaturationAlert",
+          "severity": "critical",
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-bbb-02",
+          "value": 1.0,
+          "annotations": {
+            "kv_cache_usage": "1.0"
+          }
+        },
+        {
+          "alert_id": "ALT-02-04",
+          "timestamp": 1730765015.0,
+          "source": "prometheus",
+          "name": "VllmRequestQueueSurgeAlert",
+          "severity": "warning",
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-bbb-02",
+          "value": 45.0,
+          "annotations": {
+            "queue_depth": "45"
+          }
+        },
+        {
+          "alert_id": "ALT-02-05",
+          "timestamp": 1730765018.0,
+          "source": "prometheus",
+          "name": "PrometheusExporterScrapeSuccess",
+          "severity": "info",
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-bbb-02",
+          "value": 1.0,
+          "annotations": {
+            "job": "dcgm-exporter"
+          }
+        },
+        {
+          "alert_id": "ALT-02-06",
+          "timestamp": 1730765020.0,
+          "source": "kubelet",
+          "name": "ContainerdShimLifecyclePing",
+          "severity": "info",
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-bbb-02",
+          "value": 0.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730764700.0,
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "gpu_uuid": "GPU-bbb-02",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 65000.0
+        },
+        {
+          "timestamp": 1730764760.0,
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "gpu_uuid": "GPU-bbb-02",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 71000.0
+        },
+        {
+          "timestamp": 1730764820.0,
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "gpu_uuid": "GPU-bbb-02",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 76000.0
+        },
+        {
+          "timestamp": 1730764880.0,
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "gpu_uuid": "GPU-bbb-02",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 79500.0
+        },
+        {
+          "timestamp": 1730764940.0,
+          "node": "gpu-node-worker-02",
+          "pod": "mistral-large-vllm-41b2-1",
+          "gpu_uuid": "GPU-bbb-02",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 81100.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "CUDA_VRAM_KV_OVERFLOW",
+        "expected_risk_tier": "HIGH_MUTATION",
+        "expected_approval_status": "PENDING_APPROVAL"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-03-TIMESLICING-COLLISION",
+      "title": "Time-Slicing Co-Tenant VRAM Collision Storm across unisolated pods",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 1,
+        "gpu_vram_pct": 97.0,
+        "sharing_strategy": "time-slicing",
+        "co_tenant_deployment": "embed-service-b",
+        "pdb_disruptions_allowed": 1,
+        "pod_status": "CrashLoopBackOff",
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-03-01",
+          "timestamp": 1730765200.0,
+          "source": "kubelet",
+          "name": "KubePodCrashLooping",
+          "severity": "critical",
+          "node": "gpu-node-worker-03",
+          "pod": "embed-service-b-pod-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ccc-03",
+          "value": 1.0,
+          "annotations": {
+            "exit_code": "1",
+            "sharing_strategy": "time-slicing",
+            "message": "torch.cuda.OutOfMemoryError: Tried to allocate 2.00 GiB. GPU 0 has 45.12 GiB allocated by other processes!"
+          }
+        },
+        {
+          "alert_id": "ALT-03-02",
+          "timestamp": 1730765205.0,
+          "source": "prometheus",
+          "name": "TimeSlicingCoTenantConflict",
+          "severity": "critical",
+          "node": "gpu-node-worker-03",
+          "pod": "embed-service-b-pod-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ccc-03",
+          "value": 2.0,
+          "annotations": {
+            "sharing_strategy": "time-slicing",
+            "co_tenant_pod": "embed-service-a-pod-1"
+          }
+        },
+        {
+          "alert_id": "ALT-03-03",
+          "timestamp": 1730765210.0,
+          "source": "prometheus",
+          "name": "GpuFramebufferSaturationAlert",
+          "severity": "critical",
+          "node": "gpu-node-worker-03",
+          "pod": "embed-service-b-pod-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ccc-03",
+          "value": 97.0,
+          "annotations": {
+            "utilization_pct": "97.0"
+          }
+        },
+        {
+          "alert_id": "ALT-03-04",
+          "timestamp": 1730765215.0,
+          "source": "kubelet",
+          "name": "KubeNodeNotReadyFlapping",
+          "severity": "warning",
+          "node": "gpu-node-worker-03",
+          "pod": "embed-service-b-pod-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ccc-03",
+          "value": 1.0,
+          "annotations": {
+            "sharing_strategy": "time-slicing"
+          }
+        },
+        {
+          "alert_id": "ALT-03-05",
+          "timestamp": 1730765218.0,
+          "source": "kubelet",
+          "name": "KubeletCgroupAccountingPing",
+          "severity": "info",
+          "node": "gpu-node-worker-03",
+          "pod": "embed-service-b-pod-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ccc-03",
+          "value": 0.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730765100.0,
+          "node": "gpu-node-worker-03",
+          "pod": "embed-service-b-pod-2",
+          "gpu_uuid": "GPU-ccc-03",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 79200.0
+        },
+        {
+          "timestamp": 1730765130.0,
+          "node": "gpu-node-worker-03",
+          "pod": "embed-service-b-pod-2",
+          "gpu_uuid": "GPU-ccc-03",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 79500.0
+        },
+        {
+          "timestamp": 1730765160.0,
+          "node": "gpu-node-worker-03",
+          "pod": "embed-service-b-pod-2",
+          "gpu_uuid": "GPU-ccc-03",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 79800.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "TIMESLICING_VRAM_COLLISION",
+        "expected_risk_tier": "HIGH_MUTATION",
+        "expected_approval_status": "PENDING_APPROVAL"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-04-PREEMPTION-STORM",
+      "title": "vLLM KV-Cache Preemption Storm and Request Thrashing under traffic spike",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 0,
+        "pod_status": "Running",
+        "pdb_disruptions_allowed": 1,
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-04-01",
+          "timestamp": 1730765400.0,
+          "source": "prometheus",
+          "name": "VllmPreemptionStorm",
+          "severity": "critical",
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ddd-04",
+          "value": 45.0,
+          "annotations": {
+            "pod_status": "Running",
+            "message": "WARNING: Sequence group 42 is preempted by PreemptionMode.RECOMPUTE due to lack of GPU memory"
+          }
+        },
+        {
+          "alert_id": "ALT-04-02",
+          "timestamp": 1730765405.0,
+          "source": "prometheus",
+          "name": "VllmCacheUsageHigh",
+          "severity": "warning",
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ddd-04",
+          "value": 0.98,
+          "annotations": {
+            "kv_cache_usage_perc": "0.98"
+          }
+        },
+        {
+          "alert_id": "ALT-04-03",
+          "timestamp": 1730765410.0,
+          "source": "prometheus",
+          "name": "VllmSloBreachLatency",
+          "severity": "critical",
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ddd-04",
+          "value": 4.8,
+          "annotations": {
+            "ttft_seconds": "4.8",
+            "slo_target_seconds": "0.200"
+          }
+        },
+        {
+          "alert_id": "ALT-04-04",
+          "timestamp": 1730765415.0,
+          "source": "prometheus",
+          "name": "VllmWaitingQueueDepthHigh",
+          "severity": "warning",
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ddd-04",
+          "value": 24.0,
+          "annotations": {
+            "waiting_requests": "24"
+          }
+        },
+        {
+          "alert_id": "ALT-04-05",
+          "timestamp": 1730765418.0,
+          "source": "kubelet",
+          "name": "KubeletPidsLimitHealthCheck",
+          "severity": "info",
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ddd-04",
+          "value": 0.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730765300.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:num_preemptions_total",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730765320.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:num_preemptions_total",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730765340.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:num_preemptions_total",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730765360.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:num_preemptions_total",
+          "value": 15.0
+        },
+        {
+          "timestamp": 1730765380.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:num_preemptions_total",
+          "value": 45.0
+        },
+        {
+          "timestamp": 1730765300.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:time_to_first_token_seconds",
+          "value": 0.12
+        },
+        {
+          "timestamp": 1730765320.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:time_to_first_token_seconds",
+          "value": 0.13
+        },
+        {
+          "timestamp": 1730765340.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:time_to_first_token_seconds",
+          "value": 0.12
+        },
+        {
+          "timestamp": 1730765360.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:time_to_first_token_seconds",
+          "value": 2.8
+        },
+        {
+          "timestamp": 1730765380.0,
+          "node": "gpu-node-worker-04",
+          "pod": "qwen-2.5-72b-vllm-99x",
+          "gpu_uuid": "GPU-ddd-04",
+          "metric": "vllm:time_to_first_token_seconds",
+          "value": 4.8
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "VLLM_KV_PREEMPTION_STORM",
+        "expected_risk_tier": "MEDIUM_SCALING",
+        "expected_approval_status": "PENDING_APPROVAL"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-05-NCCL-SHM-EXHAUSTION",
+      "title": "Multi-GPU NCCL Watchdog Timeout or SIGBUS (Exit 135) due to default 64Mi /dev/shm",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 135,
+        "is_multi_gpu": true,
+        "shm_size_mb": 64.0,
+        "pdb_disruptions_allowed": 1,
+        "pod_status": "CrashLoopBackOff"
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-05-01",
+          "timestamp": 1730765600.0,
+          "source": "kubelet",
+          "name": "KubePodContainerTerminated",
+          "severity": "critical",
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-eee-05",
+          "value": 135.0,
+          "annotations": {
+            "exit_code": "135",
+            "signal": "SIGBUS",
+            "is_multi_gpu": "true",
+            "message": "NCCL WARN Call to posix_fallocate failed : No space left on device (/dev/shm/nccl-...)"
+          }
+        },
+        {
+          "alert_id": "ALT-05-02",
+          "timestamp": 1730765605.0,
+          "source": "prometheus",
+          "name": "NcclWatchdogTimeout",
+          "severity": "critical",
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-eee-05",
+          "value": 600.0,
+          "annotations": {
+            "is_multi_gpu": "true",
+            "timeout_seconds": "600"
+          }
+        },
+        {
+          "alert_id": "ALT-05-03",
+          "timestamp": 1730765610.0,
+          "source": "prometheus",
+          "name": "NcclRingBufferAllocationFailure",
+          "severity": "critical",
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-eee-05",
+          "value": 1.0,
+          "annotations": {
+            "shm_mount": "/dev/shm",
+            "shm_capacity": "64Mi"
+          }
+        },
+        {
+          "alert_id": "ALT-05-04",
+          "timestamp": 1730765615.0,
+          "source": "kubelet",
+          "name": "MultiGpuPodCrashLoop",
+          "severity": "warning",
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-eee-05",
+          "value": 2.0,
+          "annotations": {
+            "tensor_parallel_size": "4"
+          }
+        },
+        {
+          "alert_id": "ALT-05-05",
+          "timestamp": 1730765618.0,
+          "source": "kubelet",
+          "name": "KubeletMountPropagationNotice",
+          "severity": "info",
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-eee-05",
+          "value": 0.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730765500.0,
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "gpu_uuid": "GPU-eee-05",
+          "metric": "container_shm_used_bytes",
+          "value": 67108864.0
+        },
+        {
+          "timestamp": 1730765530.0,
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "gpu_uuid": "GPU-eee-05",
+          "metric": "container_shm_used_bytes",
+          "value": 67108864.0
+        },
+        {
+          "timestamp": 1730765500.0,
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "gpu_uuid": "GPU-eee-05",
+          "metric": "vllm:time_per_output_token_seconds",
+          "value": 0.02
+        },
+        {
+          "timestamp": 1730765520.0,
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "gpu_uuid": "GPU-eee-05",
+          "metric": "vllm:time_per_output_token_seconds",
+          "value": 0.021
+        },
+        {
+          "timestamp": 1730765540.0,
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "gpu_uuid": "GPU-eee-05",
+          "metric": "vllm:time_per_output_token_seconds",
+          "value": 0.02
+        },
+        {
+          "timestamp": 1730765560.0,
+          "node": "gpu-node-worker-05",
+          "pod": "deepseek-v2-worker-0",
+          "gpu_uuid": "GPU-eee-05",
+          "metric": "vllm:time_per_output_token_seconds",
+          "value": 15.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "NCCL_SHM_EXHAUSTION",
+        "expected_risk_tier": "HIGH_MUTATION",
+        "expected_approval_status": "PENDING_APPROVAL"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-06-SILICON-XID-79",
+      "title": "Silicon Hardware Fault XID 79: GPU fallen off the PCIe bus following thermal surge",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 139,
+        "pdb_disruptions_allowed": 2,
+        "pod_status": "CrashLoopBackOff",
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-06-01",
+          "timestamp": 1730765800.0,
+          "source": "npd",
+          "name": "NpdGpuHardwareFault",
+          "severity": "critical",
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-fff-06",
+          "value": 79.0,
+          "annotations": {
+            "xid": "79",
+            "message": "NVRM: Xid (PCI:0000:81:00): 79, GPU has fallen off the bus."
+          }
+        },
+        {
+          "alert_id": "ALT-06-02",
+          "timestamp": 1730765805.0,
+          "source": "prometheus",
+          "name": "DcgmXidCritical",
+          "severity": "critical",
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-fff-06",
+          "value": 79.0,
+          "annotations": {
+            "xid": "79"
+          }
+        },
+        {
+          "alert_id": "ALT-06-03",
+          "timestamp": 1730765810.0,
+          "source": "kubelet",
+          "name": "KubePodCrashLooping",
+          "severity": "critical",
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-fff-06",
+          "value": 139.0,
+          "annotations": {
+            "exit_code": "139",
+            "signal": "SIGSEGV"
+          }
+        },
+        {
+          "alert_id": "ALT-06-04",
+          "timestamp": 1730765815.0,
+          "source": "npd",
+          "name": "NvidiaDevicePluginAllocationError",
+          "severity": "critical",
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-fff-06",
+          "value": 1.0,
+          "annotations": {
+            "message": "Unable to determine device handle: GPU fallen off bus"
+          }
+        },
+        {
+          "alert_id": "ALT-06-05",
+          "timestamp": 1730765818.0,
+          "source": "npd",
+          "name": "NodeProblemDetectorHeartbeat",
+          "severity": "info",
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-fff-06",
+          "value": 0.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730765700.0,
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "gpu_uuid": "GPU-fff-06",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 52.0
+        },
+        {
+          "timestamp": 1730765720.0,
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "gpu_uuid": "GPU-fff-06",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 54.0
+        },
+        {
+          "timestamp": 1730765740.0,
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "gpu_uuid": "GPU-fff-06",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 53.0
+        },
+        {
+          "timestamp": 1730765760.0,
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "gpu_uuid": "GPU-fff-06",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 92.0
+        },
+        {
+          "timestamp": 1730765780.0,
+          "node": "gpu-node-worker-06",
+          "pod": "batch-training-worker-4",
+          "gpu_uuid": "GPU-fff-06",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 96.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "GPU_SILICON_XID_FAULT",
+        "expected_risk_tier": "CRITICAL_NODE_DRAIN",
+        "expected_approval_status": "PENDING_APPROVAL"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-07-NVLINK-DEGRADATION",
+      "title": "Inter-GPU NVLink Fabric Degradation via accumulating CRC Flit Errors",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 0,
+        "is_multi_gpu": true,
+        "pod_status": "Running",
+        "pdb_disruptions_allowed": 1
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-07-01",
+          "timestamp": 1730766000.0,
+          "source": "prometheus",
+          "name": "NvlinkFlitCrcErrorsHigh",
+          "severity": "critical",
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ggg-07",
+          "value": 2450.0,
+          "annotations": {
+            "metric": "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL",
+            "message": "NVLink CRC error threshold breached on link 2"
+          }
+        },
+        {
+          "alert_id": "ALT-07-02",
+          "timestamp": 1730766005.0,
+          "source": "prometheus",
+          "name": "InterGpuThroughputDrop",
+          "severity": "warning",
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ggg-07",
+          "value": 45.0,
+          "annotations": {
+            "bandwidth_drop_pct": "45%"
+          }
+        },
+        {
+          "alert_id": "ALT-07-03",
+          "timestamp": 1730766010.0,
+          "source": "prometheus",
+          "name": "DistributedTpotDegradation",
+          "severity": "warning",
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ggg-07",
+          "value": 0.22,
+          "annotations": {
+            "tpot_seconds": "0.220",
+            "baseline_seconds": "0.020"
+          }
+        },
+        {
+          "alert_id": "ALT-07-04",
+          "timestamp": 1730766015.0,
+          "source": "prometheus",
+          "name": "NvlinkBandwidthThrottling",
+          "severity": "warning",
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ggg-07",
+          "value": 1.0,
+          "annotations": {}
+        },
+        {
+          "alert_id": "ALT-07-05",
+          "timestamp": 1730766018.0,
+          "source": "prometheus",
+          "name": "DcgmTelemetryPollerHealthy",
+          "severity": "info",
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-ggg-07",
+          "value": 1.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730765900.0,
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "gpu_uuid": "GPU-ggg-07",
+          "metric": "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730765920.0,
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "gpu_uuid": "GPU-ggg-07",
+          "metric": "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730765940.0,
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "gpu_uuid": "GPU-ggg-07",
+          "metric": "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730765960.0,
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "gpu_uuid": "GPU-ggg-07",
+          "metric": "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL",
+          "value": 412.0
+        },
+        {
+          "timestamp": 1730765980.0,
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "gpu_uuid": "GPU-ggg-07",
+          "metric": "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL",
+          "value": 1080.0
+        },
+        {
+          "timestamp": 1730766000.0,
+          "node": "gpu-node-worker-07",
+          "pod": "megatron-lm-worker-2",
+          "gpu_uuid": "GPU-ggg-07",
+          "metric": "DCGM_FI_DEV_NVLINK_CRC_FLIT_ERROR_COUNT_TOTAL",
+          "value": 2450.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "NVLINK_FABRIC_DEGRADATION",
+        "expected_risk_tier": "CRITICAL_NODE_DRAIN",
+        "expected_approval_status": "PENDING_APPROVAL"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-08-USER-SPACE-XID-31",
+      "title": "User-space Application CUDA Page Fault XID 31 (software bug, healthy silicon)",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 1,
+        "pod_status": "CrashLoopBackOff",
+        "pdb_disruptions_allowed": 1,
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-08-01",
+          "timestamp": 1730766200.0,
+          "source": "npd",
+          "name": "DcgmXidAlert",
+          "severity": "warning",
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-hhh-08",
+          "value": 31.0,
+          "annotations": {
+            "xid": "31",
+            "message": "NVRM: Xid (PCI:0000:41:00): 31, GPU memory page fault at 0x7f88000"
+          }
+        },
+        {
+          "alert_id": "ALT-08-02",
+          "timestamp": 1730766205.0,
+          "source": "kubelet",
+          "name": "KubePodCrashLooping",
+          "severity": "warning",
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-hhh-08",
+          "value": 1.0,
+          "annotations": {
+            "exit_code": "1",
+            "message": "CUDA error: an illegal memory access was encountered"
+          }
+        },
+        {
+          "alert_id": "ALT-08-03",
+          "timestamp": 1730766210.0,
+          "source": "prometheus",
+          "name": "UserSpaceKernelFault",
+          "severity": "info",
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-hhh-08",
+          "value": 31.0,
+          "annotations": {
+            "hardware_healthy": "true"
+          }
+        },
+        {
+          "alert_id": "ALT-08-04",
+          "timestamp": 1730766215.0,
+          "source": "kubelet",
+          "name": "KubeletContainerLogRotated",
+          "severity": "info",
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-hhh-08",
+          "value": 0.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730766100.0,
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "gpu_uuid": "GPU-hhh-08",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 45.0
+        },
+        {
+          "timestamp": 1730766130.0,
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "gpu_uuid": "GPU-hhh-08",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 45.0
+        },
+        {
+          "timestamp": 1730766160.0,
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "gpu_uuid": "GPU-hhh-08",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 46.0
+        },
+        {
+          "timestamp": 1730766100.0,
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "gpu_uuid": "GPU-hhh-08",
+          "metric": "DCGM_FI_DEV_XID_ERRORS",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730766120.0,
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "gpu_uuid": "GPU-hhh-08",
+          "metric": "DCGM_FI_DEV_XID_ERRORS",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730766140.0,
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "gpu_uuid": "GPU-hhh-08",
+          "metric": "DCGM_FI_DEV_XID_ERRORS",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730766160.0,
+          "node": "gpu-node-worker-08",
+          "pod": "custom-kernel-test-pod-1",
+          "gpu_uuid": "GPU-hhh-08",
+          "metric": "DCGM_FI_DEV_XID_ERRORS",
+          "value": 31.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "USER_SPACE_CUDA_XID",
+        "expected_risk_tier": "LOW_READONLY",
+        "expected_approval_status": "AUTO_APPROVED"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-09-PDB-BLOCKED-XID-79",
+      "title": "Silicon Hardware Fault XID 79 strictly BLOCKED by PodDisruptionBudget (disruptions_allowed=0)",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 139,
+        "pdb_disruptions_allowed": 0,
+        "pod_status": "CrashLoopBackOff",
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-09-01",
+          "timestamp": 1730766400.0,
+          "source": "npd",
+          "name": "NpdGpuHardwareFault",
+          "severity": "critical",
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-iii-09",
+          "value": 79.0,
+          "annotations": {
+            "xid": "79",
+            "message": "NVRM: Xid: 79, GPU has fallen off the bus"
+          }
+        },
+        {
+          "alert_id": "ALT-09-02",
+          "timestamp": 1730766405.0,
+          "source": "prometheus",
+          "name": "DcgmXidCritical",
+          "severity": "critical",
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-iii-09",
+          "value": 79.0,
+          "annotations": {
+            "xid": "79"
+          }
+        },
+        {
+          "alert_id": "ALT-09-03",
+          "timestamp": 1730766410.0,
+          "source": "kubelet",
+          "name": "KubePodCrashLooping",
+          "severity": "critical",
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-iii-09",
+          "value": 139.0,
+          "annotations": {
+            "exit_code": "139"
+          }
+        },
+        {
+          "alert_id": "ALT-09-04",
+          "timestamp": 1730766415.0,
+          "source": "kubelet",
+          "name": "PdbDisruptionViolationRisk",
+          "severity": "critical",
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-iii-09",
+          "value": 0.0,
+          "annotations": {
+            "disruptions_allowed": "0"
+          }
+        },
+        {
+          "alert_id": "ALT-09-05",
+          "timestamp": 1730766418.0,
+          "source": "prometheus",
+          "name": "NodeExporterDiskPressureCheck",
+          "severity": "info",
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-iii-09",
+          "value": 0.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730766240.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 52.0
+        },
+        {
+          "timestamp": 1730766260.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 53.0
+        },
+        {
+          "timestamp": 1730766280.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 54.0
+        },
+        {
+          "timestamp": 1730766300.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 89.0
+        },
+        {
+          "timestamp": 1730766330.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 94.0
+        },
+        {
+          "timestamp": 1730766240.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_XID_ERRORS",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730766260.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_XID_ERRORS",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730766280.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_XID_ERRORS",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730766300.0,
+          "node": "gpu-node-worker-09",
+          "pod": "single-replica-critical-api-1",
+          "gpu_uuid": "GPU-iii-09",
+          "metric": "DCGM_FI_DEV_XID_ERRORS",
+          "value": 79.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "GPU_SILICON_XID_FAULT",
+        "expected_risk_tier": "CRITICAL_NODE_DRAIN",
+        "expected_approval_status": "BLOCKED_BY_PDB"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-10-SILICON-XID-95",
+      "title": "Silicon Hardware Fault XID 95: Uncontained ECC Error halting execution in HBM",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 1,
+        "pdb_disruptions_allowed": 1,
+        "pod_status": "CrashLoopBackOff",
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-10-01",
+          "timestamp": 1730766600.0,
+          "source": "npd",
+          "name": "NpdGpuHardwareFault",
+          "severity": "critical",
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-jjj-10",
+          "value": 95.0,
+          "annotations": {
+            "xid": "95",
+            "message": "NVRM: Xid: 95, Uncontained ECC error, contained=0"
+          }
+        },
+        {
+          "alert_id": "ALT-10-02",
+          "timestamp": 1730766605.0,
+          "source": "prometheus",
+          "name": "DcgmXidCritical",
+          "severity": "critical",
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-jjj-10",
+          "value": 95.0,
+          "annotations": {
+            "xid": "95"
+          }
+        },
+        {
+          "alert_id": "ALT-10-03",
+          "timestamp": 1730766610.0,
+          "source": "kubelet",
+          "name": "KubePodCrashLooping",
+          "severity": "critical",
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-jjj-10",
+          "value": 1.0,
+          "annotations": {
+            "exit_code": "1",
+            "message": "CUDA error: uncorrectable ECC error encountered"
+          }
+        },
+        {
+          "alert_id": "ALT-10-04",
+          "timestamp": 1730766615.0,
+          "source": "npd",
+          "name": "HbmMemoryIntegrityFailure",
+          "severity": "critical",
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-jjj-10",
+          "value": 95.0,
+          "annotations": {}
+        },
+        {
+          "alert_id": "ALT-10-05",
+          "timestamp": 1730766618.0,
+          "source": "npd",
+          "name": "DcgmModuleVersionHandshake",
+          "severity": "info",
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-jjj-10",
+          "value": 1.0,
+          "annotations": {}
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730766500.0,
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "gpu_uuid": "GPU-jjj-10",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 58.0
+        },
+        {
+          "timestamp": 1730766520.0,
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "gpu_uuid": "GPU-jjj-10",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 60.0
+        },
+        {
+          "timestamp": 1730766540.0,
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "gpu_uuid": "GPU-jjj-10",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 62.0
+        },
+        {
+          "timestamp": 1730766560.0,
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "gpu_uuid": "GPU-jjj-10",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 78.0
+        },
+        {
+          "timestamp": 1730766580.0,
+          "node": "gpu-node-worker-10",
+          "pod": "distributed-serving-worker-1",
+          "gpu_uuid": "GPU-jjj-10",
+          "metric": "DCGM_FI_DEV_GPU_TEMP",
+          "value": 85.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": true,
+        "root_cause_class": "GPU_SILICON_XID_FAULT",
+        "expected_risk_tier": "CRITICAL_NODE_DRAIN",
+        "expected_approval_status": "PENDING_APPROVAL"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-11-BENIGN-PREFILL-BURST",
+      "title": "Benign Transient Prefill Burst: 98% GPU compute surge with stable VRAM and 0 preemptions",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 0,
+        "pod_status": "Running",
+        "pdb_disruptions_allowed": 1,
+        "gpu_vram_pct": 46.0,
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-11-01",
+          "timestamp": 1730766800.0,
+          "source": "prometheus",
+          "name": "TransientHighGpuUtilizationPing",
+          "severity": "info",
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-kkk-11",
+          "value": 98.0,
+          "annotations": {
+            "message": "Transient compute surge during long prompt context prefill",
+            "pod_status": "Running"
+          }
+        },
+        {
+          "alert_id": "ALT-11-02",
+          "timestamp": 1730766805.0,
+          "source": "prometheus",
+          "name": "PrometheusThresholdPing",
+          "severity": "info",
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-kkk-11",
+          "value": 98.0,
+          "annotations": {
+            "pod_status": "Running"
+          }
+        },
+        {
+          "alert_id": "ALT-11-03",
+          "timestamp": 1730766810.0,
+          "source": "kubelet",
+          "name": "KubeletProbeExecutionLatency",
+          "severity": "info",
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-kkk-11",
+          "value": 0.012,
+          "annotations": {
+            "pod_status": "Running"
+          }
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730766700.0,
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "gpu_uuid": "GPU-kkk-11",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 38000.0
+        },
+        {
+          "timestamp": 1730766720.0,
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "gpu_uuid": "GPU-kkk-11",
+          "metric": "vllm:num_preemptions_total",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730766720.0,
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "gpu_uuid": "GPU-kkk-11",
+          "metric": "vllm:gpu_cache_usage_perc",
+          "value": 0.42
+        },
+        {
+          "timestamp": 1730766730.0,
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "gpu_uuid": "GPU-kkk-11",
+          "metric": "DCGM_FI_DEV_GPU_UTIL",
+          "value": 25.0
+        },
+        {
+          "timestamp": 1730766740.0,
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "gpu_uuid": "GPU-kkk-11",
+          "metric": "DCGM_FI_DEV_GPU_UTIL",
+          "value": 98.0
+        },
+        {
+          "timestamp": 1730766750.0,
+          "node": "gpu-node-worker-11",
+          "pod": "llama3-online-serving-0",
+          "gpu_uuid": "GPU-kkk-11",
+          "metric": "DCGM_FI_DEV_GPU_UTIL",
+          "value": 28.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": false,
+        "root_cause_class": "BENIGN_TRAFFIC_BURST",
+        "expected_risk_tier": "NONE",
+        "expected_approval_status": "NONE"
+      }
+    },
+    {
+      "scenario_id": "SCENARIO-12-BENIGN-BATCH-PREFILL",
+      "title": "Benign Scheduled Batch Inference: Sustained 92% compute with healthy KV cache",
+      "cluster_context": {
+        "namespace": "inference-prod",
+        "exit_code": 0,
+        "pod_status": "Running",
+        "pdb_disruptions_allowed": 1,
+        "gpu_vram_pct": 51.0,
+        "is_multi_gpu": false
+      },
+      "raw_alerts": [
+        {
+          "alert_id": "ALT-12-01",
+          "timestamp": 1730767000.0,
+          "source": "prometheus",
+          "name": "GpuComputeSaturationWarning",
+          "severity": "info",
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-lll-12",
+          "value": 92.0,
+          "annotations": {
+            "message": "High GPU compute utilization during scheduled evaluation batch",
+            "pod_status": "Running"
+          }
+        },
+        {
+          "alert_id": "ALT-12-02",
+          "timestamp": 1730767005.0,
+          "source": "prometheus",
+          "name": "BatchWorkloadThroughputNotice",
+          "severity": "info",
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-lll-12",
+          "value": 1.0,
+          "annotations": {
+            "pod_status": "Running"
+          }
+        },
+        {
+          "alert_id": "ALT-12-03",
+          "timestamp": 1730767010.0,
+          "source": "prometheus",
+          "name": "PrometheusTargetHealthy",
+          "severity": "info",
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "namespace": "inference-prod",
+          "gpu_uuid": "GPU-lll-12",
+          "value": 1.0,
+          "annotations": {
+            "pod_status": "Running"
+          }
+        }
+      ],
+      "telemetry_points": [
+        {
+          "timestamp": 1730766900.0,
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "gpu_uuid": "GPU-lll-12",
+          "metric": "DCGM_FI_DEV_FB_USED",
+          "value": 42000.0
+        },
+        {
+          "timestamp": 1730766920.0,
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "gpu_uuid": "GPU-lll-12",
+          "metric": "vllm:num_preemptions_total",
+          "value": 0.0
+        },
+        {
+          "timestamp": 1730766920.0,
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "gpu_uuid": "GPU-lll-12",
+          "metric": "vllm:gpu_cache_usage_perc",
+          "value": 0.51
+        },
+        {
+          "timestamp": 1730766930.0,
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "gpu_uuid": "GPU-lll-12",
+          "metric": "DCGM_FI_DEV_GPU_UTIL",
+          "value": 90.0
+        },
+        {
+          "timestamp": 1730766940.0,
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "gpu_uuid": "GPU-lll-12",
+          "metric": "DCGM_FI_DEV_GPU_UTIL",
+          "value": 92.0
+        },
+        {
+          "timestamp": 1730766950.0,
+          "node": "gpu-node-worker-12",
+          "pod": "batch-eval-pod-3",
+          "gpu_uuid": "GPU-lll-12",
+          "metric": "DCGM_FI_DEV_GPU_UTIL",
+          "value": 91.0
+        }
+      ],
+      "ground_truth": {
+        "should_emit_incident": false,
+        "root_cause_class": "BENIGN_TRAFFIC_BURST",
+        "expected_risk_tier": "NONE",
+        "expected_approval_status": "NONE"
+      }
+    }
+  ]
+}
